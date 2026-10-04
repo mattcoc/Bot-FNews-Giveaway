@@ -92,6 +92,22 @@ def is_admin(user_id: int) -> bool:
 # ANIMAZIONI
 # ============================================================================
 
+def is_expired_query_error(error: Exception) -> bool:
+    """True per i pulsanti premuti troppo tempo fa (es. mentre il bot era spento)"""
+    msg = str(error).lower()
+    return isinstance(error, BadRequest) and ("query is too old" in msg or "query id is invalid" in msg)
+
+async def safe_answer(query, *args, **kwargs) -> None:
+    """
+    Risponde al tocco di un pulsante. Telegram accetta la risposta solo per pochi secondi:
+    se è scaduta (es. pulsante premuto a bot spento) la ignora e l'azione viene eseguita comunque.
+    """
+    try:
+        await query.answer(*args, **kwargs)
+    except BadRequest as e:
+        if not is_expired_query_error(e):
+            raise
+
 async def send_animated(bot, chat_id: int, text: str, effect_id: Optional[str] = None, **kwargs):
     """
     Invia un messaggio con un effetto animato di Telegram (coriandoli, fuoco, cuori...).
@@ -559,7 +575,7 @@ async def deliver_rich_message(
     if query:
         if not already_answered:
             try:
-                await query.answer()
+                await safe_answer(query)
             except Exception:
                 pass
         chat_id = query.message.chat_id if query.message else None
@@ -787,21 +803,21 @@ async def user_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     # L'aiuto e la classifica sono sempre disponibili, anche senza registrazione
     if data == "user_help":
-        await query.answer()
+        await safe_answer(query)
         await show_help(update, context)
         return
     if data == "user_leaderboard":
-        await query.answer()
+        await safe_answer(query)
         await display_leaderboard(update, context, is_admin_view=False)
         return
 
     user_info_db = db.get_user(user_id)
     if not user_info_db:
-        await query.answer("👋 Prima scrivi /start per iscriverti al giveaway!", show_alert=True)
+        await safe_answer(query, "👋 Prima scrivi /start per iscriverti al giveaway!", show_alert=True)
         return
 
     if data == "check_membership":
-        await query.answer("🔍 Controllo in corso...")
+        await safe_answer(query, "🔍 Controllo in corso...")
         membership = await check_membership_animated(update, context, user_id)
         if membership['unknown']:
             await send_check_unavailable(update)
@@ -822,7 +838,7 @@ async def user_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             await send_channels_prompt(update, membership, show_missing=True)
         return
 
-    await query.answer()
+    await safe_answer(query)
     if not await get_ready_user(update, context):
         return
 
@@ -1089,7 +1105,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Gestione dei callback del pannello admin"""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     user_id = query.from_user.id
     if not is_admin(user_id):
         return
@@ -1288,6 +1304,9 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     """Logga gli errori causati dagli update ignorando i click ridondanti"""
     if isinstance(context.error, BadRequest) and "message is not modified" in str(context.error).lower():
         logger.debug("Update ignorato: il messaggio ha già lo stesso contenuto (Message is not modified)")
+        return
+    if is_expired_query_error(context.error):
+        logger.debug("Pulsante premuto troppo tempo fa, risposta scaduta: ignorato")
         return
     logger.error("Exception while handling an update:", exc_info=context.error)
 
