@@ -42,6 +42,13 @@ BTN_INVITE = "📤 Invita amici"
 BTN_RANKING = "🏆 Classifica"
 BTN_HELP = "❓ Aiuto"
 
+# Animazioni: effetti a schermo intero di Telegram sui messaggi importanti (solo chat private).
+# Metti False per disattivarle. Se un effetto non è disponibile, il messaggio parte comunque senza.
+ANIMATIONS_ENABLED = True
+EFFECT_CONFETTI = "5046509860389126442"  # 🎉
+EFFECT_FIRE = "5104841245755180586"      # 🔥
+EFFECT_HEART = "5044134455711629726"     # ❤️
+
 SHARE_TEXT = "🎮 Partecipa con me al Giveaway Fortnite! 7 premi in palio, entri gratis in 1 minuto 👇"
 
 class ButtonStyle:
@@ -114,7 +121,7 @@ Il tuo link personale (tocca per copiarlo):
 
 {participation_status}
 
-🎟️ <b>Biglietti: {total_tickets}</b>
+🎟️ <b>Biglietti: {total_tickets}</b>  {tickets_bar}
    • {base_tickets} perché sei iscritto ai canali
    • +{referral_tickets} dagli amici invitati ({referrals})
 
@@ -124,7 +131,7 @@ Il tuo link personale (tocca per copiarlo):
 🔗 Il tuo link per invitare (tocca per copiarlo):
 <code>{link}</code>
 
-💡 <i>Se vieni estratto, vince anche uno dei tuoi amici invitati!</i>
+💡 <i>Se vieni estratto tra i 5, i tuoi amici invitati partecipano all'estrazione del premio bonus!</i>
 """,
 
     "self_referral": """😅 Questo è il <b>tuo</b> link! Non devi usarlo tu: mandalo ai tuoi amici.""",
@@ -216,8 +223,7 @@ Risultati parziali: ✅ {success} | ❌ {failed}
 
 <b>1. Come partecipo?</b>
 Entra in questi 2 canali e premi <b>UNISCITI</b>:
-• @FortniteNews
-• @FortniteBundles
+{channels}
 Fatto! Hai già <b>1 biglietto</b> 🎟️
 
 <b>2. Come aumento le possibilità di vincere?</b>
@@ -276,6 +282,19 @@ Non serve scrivere: usa i <b>pulsanti</b> 👇
 Se non li vedi, scrivi /start""",
 
     "not_registered": "👋 Prima devi iscriverti al giveaway: tocca qui 👉 /start",
+
+    "former_leaver_referral": """
+😕 <b>Questo amico non conta</b>
+
+👤 <b>{username}</b> era già nei canali durante il giveaway ed è uscito.
+Valgono solo gli amici <b>nuovi</b>, che entrano grazie al tuo link.
+""",
+
+    "referrer_paused_note": "\n⚠️ <b>Attenzione:</b> tu non sei più in tutti e 2 i canali, quindi i tuoi biglietti non contano! Rientra e tocca /start.",
+
+    "channels_missing_header": "❌ <b>Manca ancora: {missing}</b>\n<i>Se ti sei appena iscritto, aspetta qualche secondo e riprova.</i>\n",
+
+    "checking_channels": "🔍 <b>Controllo le tue iscrizioni...</b>\n\n{lines}",
 
     "group_redirect": "👋 Per partecipare al giveaway devi scrivermi <b>in privato</b>.\n\nTocca il pulsante qui sotto 👇"
 }

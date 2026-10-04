@@ -18,7 +18,7 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, filters, ChatMemberHandler
 )
 from telegram.error import TelegramError, BadRequest, RetryAfter
-from telegram.constants import ParseMode
+from telegram.constants import ParseMode, ChatAction, DiceEmoji
 
 import config
 from config import ButtonStyle
@@ -78,7 +78,7 @@ def build_button(
 def build_copy_referral_button(bot_link: str) -> InlineKeyboardButton:
     """Pulsante inline: copia il link referral negli appunti con un tocco (mobile-friendly)."""
     return build_button(
-        "📋 Copia link referral",
+        "📋 Copia il tuo link",
         copy_text=CopyTextButton(text=bot_link),
         style=ButtonStyle.SUCCESS,
     )
@@ -87,6 +87,41 @@ def build_copy_referral_button(bot_link: str) -> InlineKeyboardButton:
 def is_admin(user_id: int) -> bool:
     """Verifica se l'utente è un amministratore configurato"""
     return user_id in config.ADMIN_IDS
+
+# ============================================================================
+# ANIMAZIONI
+# ============================================================================
+
+async def send_animated(bot, chat_id: int, text: str, effect_id: Optional[str] = None, **kwargs):
+    """
+    Invia un messaggio con un effetto animato di Telegram (coriandoli, fuoco, cuori...).
+    Se gli effetti sono disattivati o non disponibili, invia il messaggio normale.
+    """
+    kwargs.setdefault("parse_mode", ParseMode.HTML)
+    if effect_id and config.ANIMATIONS_ENABLED:
+        try:
+            return await bot.send_message(chat_id=chat_id, text=text, message_effect_id=effect_id, **kwargs)
+        except BadRequest as e:
+            if "effect" not in str(e).lower():
+                raise
+            logger.info(f"Effetto messaggio non disponibile, invio senza: {e}")
+    return await bot.send_message(chat_id=chat_id, text=text, **kwargs)
+
+async def show_typing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Mostra "sta scrivendo..." mentre il bot prepara una schermata"""
+    if not config.ANIMATIONS_ENABLED or not update.effective_chat:
+        return
+    try:
+        await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
+    except TelegramError:
+        pass
+
+async def safe_edit(message, text: str, reply_markup=None) -> None:
+    """Modifica un messaggio ignorando gli errori (usato per i fotogrammi delle animazioni)"""
+    try:
+        await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    except TelegramError:
+        pass
 
 def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     """Menu principale: poche scelte, grandi e chiare"""
@@ -208,10 +243,12 @@ async def notify_referrers(context: ContextTypes.DEFAULT_TYPE, user_info: dict, 
     """Avvisa i referrer (con invito valido) che l'invito è stato attivato, riattivato o sospeso."""
     user_id = user_info['user_id']
     username = safe_name(user_info.get('username'), user_info.get('first_name'), f"Utente {user_id}")
-    keyboard = InlineKeyboardMarkup([[build_button("📊 Vedi il Mio Stato", callback_data="user_stats", style=ButtonStyle.PRIMARY)]])
+    keyboard = InlineKeyboardMarkup([[build_button("📊 Il mio stato", callback_data="user_stats", style=ButtonStyle.PRIMARY)]])
+    giveaway_ended = db.is_giveaway_ended()
 
     for referrer_id in db.get_valid_referrers_of_user(user_id):
         ref_pts = logic.calculate_points(referrer_id)
+        effect = None
         if now_member:
             if db.mark_referral_activated(referrer_id, user_id):
                 msg = config.MESSAGES['referral_activated'].format(
@@ -219,18 +256,26 @@ async def notify_referrers(context: ContextTypes.DEFAULT_TYPE, user_info: dict, 
                     total_tickets=ref_pts['total_tickets'],
                     referrals=ref_pts['referral_count']
                 )
+                effect = config.EFFECT_CONFETTI
             else:
                 msg = config.MESSAGES['referral_reactivated'].format(
                     username=username,
                     referrals=ref_pts['referral_count']
                 )
+                effect = config.EFFECT_HEART
+            if not ref_pts['is_qualified']:
+                # Il biglietto è guadagnato, ma non conta finché il referrer stesso non è nei canali
+                msg += config.MESSAGES['referrer_paused_note']
         else:
             msg = config.MESSAGES['referral_left'].format(
                 username=username,
                 referrals=ref_pts['referral_count']
             )
+        if giveaway_ended:
+            # A giveaway concluso lo stato si aggiorna lo stesso, ma senza notifiche inutili
+            continue
         try:
-            await context.bot.send_message(chat_id=referrer_id, text=msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+            await send_animated(context.bot, referrer_id, msg, effect, reply_markup=keyboard)
         except TelegramError:
             pass
 
@@ -313,10 +358,37 @@ async def send_or_edit(update: Update, text: str, reply_markup=None) -> None:
     else:
         await update.effective_chat.send_message(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
 
-async def send_channels_prompt(update: Update, membership: dict, invited: bool = False) -> None:
+async def send_channels_prompt(update: Update, membership: dict, invited: bool = False, show_missing: bool = False) -> None:
     channels_list_txt = format_channels_list_text(membership['channels'])
     template = config.MESSAGES['invited_channels_prompt'] if invited else config.MESSAGES['channels_prompt']
-    await send_or_edit(update, template.format(channels_list=channels_list_txt), get_channels_join_keyboard(membership['channels']))
+    text = template.format(channels_list=channels_list_txt)
+    if show_missing:
+        missing = ", ".join(ch["name"] for ch in membership['channels'] if not ch["is_member"])
+        text = config.MESSAGES['channels_missing_header'].format(missing=missing) + text
+    await send_or_edit(update, text, get_channels_join_keyboard(membership['channels']))
+
+async def check_membership_animated(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> dict:
+    """
+    Controlla i canali uno alla volta mostrando il progresso nel messaggio:
+    ⏳ in controllo → ✅ fatto / ❌ manca.
+    """
+    message = update.callback_query.message if update.callback_query else None
+    channels_status = []
+    lines = [f"⏳ {ch['name']}..." for ch in config.REQUIRED_CHANNELS]
+    if message and config.ANIMATIONS_ENABLED:
+        await safe_edit(message, config.MESSAGES['checking_channels'].format(lines="\n".join(lines)))
+
+    for i, ch in enumerate(config.REQUIRED_CHANNELS):
+        is_sub = await check_single_channel_membership(context.bot, ch, user_id)
+        channels_status.append({"name": ch["name"], "username": ch["username"], "url": ch["url"], "is_member": is_sub})
+        lines[i] = f"{'✅' if is_sub else '❌'} {ch['name']}"
+        if message and config.ANIMATIONS_ENABLED:
+            await asyncio.sleep(0.5)
+            await safe_edit(message, config.MESSAGES['checking_channels'].format(lines="\n".join(lines)))
+
+    if message and config.ANIMATIONS_ENABLED:
+        await asyncio.sleep(0.5)
+    return {"all_joined": all(c["is_member"] for c in channels_status), "channels": channels_status}
 
 async def send_reply_keyboard(update: Update) -> None:
     """Mostra i pulsanti fissi sotto la tastiera"""
@@ -329,7 +401,7 @@ async def send_reply_keyboard(update: Update) -> None:
 def welcome_back_text(user_id: int) -> str:
     pts = logic.calculate_points(user_id)
     return config.MESSAGES['welcome_back'].format(
-        participation_status="✅ <b>Stai partecipando all'estrazione!</b>",
+        participation_status=logic.participation_status(pts),
         total_tickets=pts['total_tickets'],
         referrals=pts['referral_count'],
     )
@@ -402,10 +474,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_member=is_fully_joined
     )
 
-    is_ineligible_referral = was_pre_existing or db.is_user_marked_as_ineligible_leaver(user.id)
+    was_leaver = db.is_user_marked_as_ineligible_leaver(user.id)
+    is_ineligible_referral = was_pre_existing or was_leaver
     if referred_by and is_ineligible_referral:
         username_referred = safe_name(user.username, user.first_name, f"Utente {user.id}")
-        msg = config.MESSAGES['pre_existing_member'].format(username=username_referred)
+        template = config.MESSAGES['pre_existing_member'] if was_pre_existing else config.MESSAGES['former_leaver_referral']
+        msg = template.format(username=username_referred)
         try:
             await context.bot.send_message(chat_id=referred_by, text=msg, parse_mode=ParseMode.HTML)
         except TelegramError:
@@ -420,9 +494,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await notify_referrers(context, new_user, now_member=True)
 
         await send_reply_keyboard(update)
-        await update.message.reply_text(
+        await send_animated(
+            context.bot,
+            update.effective_chat.id,
             config.MESSAGES['welcome_new'].format(link=logic.get_referral_link(user.id)),
-            parse_mode=ParseMode.HTML,
+            config.EFFECT_CONFETTI,
             reply_markup=get_main_menu_keyboard(),
         )
 
@@ -530,6 +606,7 @@ async def display_leaderboard(
     else:
         user_id = update.effective_user.id
 
+    await show_typing(update, context)
     limit = 20 if is_admin_view else 10
     leaderboard = logic.get_leaderboard(limit=limit)
 
@@ -586,6 +663,7 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ============================================================================
 
 async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    await show_typing(update, context)
     keyboard = InlineKeyboardMarkup([
         [build_button("📤 Invita amici (+1 biglietto)", callback_data="user_invite", style=ButtonStyle.SUCCESS)],
         [build_button("👥 Chi ho invitato", callback_data="user_referrals", style=ButtonStyle.PRIMARY)],
@@ -615,6 +693,7 @@ async def show_invite(update: Update, context: ContextTypes.DEFAULT_TYPE, user_i
     )
 
 async def show_referrals(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    await show_typing(update, context)
     bot_link = logic.get_referral_link(user_id) or ""
     keyboard = InlineKeyboardMarkup([
         [build_button("📤 Manda ai tuoi amici", url=get_share_url(bot_link), style=ButtonStyle.SUCCESS)],
@@ -637,7 +716,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await deliver_rich_message(
         update, context,
         logic.format_help_rich_html(),
-        config.MESSAGES['help'],
+        config.MESSAGES['help'].format(channels="\n".join(f"• {ch['username']}" for ch in config.REQUIRED_CHANNELS)),
         keyboard,
         already_answered=True,
     )
@@ -687,25 +766,23 @@ async def user_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if data == "check_membership":
-        membership = await check_user_channels_membership(context.bot, user_id)
+        await query.answer("🔍 Controllo in corso...")
+        membership = await check_membership_animated(update, context, user_id)
         if membership['all_joined']:
             was_inactive = await sync_membership(context, user_info_db, True)
-            await query.answer("✅ Perfetto! Sei iscritto a tutti e 2 i canali!", show_alert=True)
-            if was_inactive:
-                text = config.MESSAGES['welcome_new'].format(link=logic.get_referral_link(user_id))
-            else:
-                text = welcome_back_text(user_id)
-            await send_or_edit(update, text, get_main_menu_keyboard())
+            await send_or_edit(update, "✅ <b>Perfetto! Sei iscritto a tutti e 2 i canali!</b>")
             await send_reply_keyboard(update)
+            if was_inactive:
+                await send_animated(
+                    context.bot, user_id,
+                    config.MESSAGES['welcome_new'].format(link=logic.get_referral_link(user_id)),
+                    config.EFFECT_CONFETTI,
+                    reply_markup=get_main_menu_keyboard(),
+                )
+            else:
+                await send_animated(context.bot, user_id, welcome_back_text(user_id), reply_markup=get_main_menu_keyboard())
         else:
-            missing = ", ".join(ch["name"] for ch in membership['channels'] if not ch["is_member"])
-            await query.answer(
-                f"❌ Non sei ancora iscritto a: {missing}.\n\n"
-                "Tocca ➕ Entra, poi nel canale premi UNISCITI. "
-                "Se l'hai appena fatto, aspetta qualche secondo e riprova.",
-                show_alert=True
-            )
-            await send_channels_prompt(update, membership)
+            await send_channels_prompt(update, membership, show_missing=True)
         return
 
     await query.answer()
@@ -913,6 +990,19 @@ async def draw_verified_winners(context: ContextTypes.DEFAULT_TYPE, max_attempts
     logger.warning("Impossibile verificare tutti i vincitori dopo il numero massimo di tentativi")
     return result
 
+async def reveal_draw_animated(context: ContextTypes.DEFAULT_TYPE, message, result: dict) -> None:
+    """Animazione dell'estrazione: dado, conto alla rovescia e vincitori svelati uno alla volta"""
+    try:
+        await context.bot.send_dice(message.chat_id, emoji=DiceEmoji.SLOT_MACHINE)
+    except TelegramError:
+        pass
+    for frame in ("🥁 <b>Rullo di tamburi...</b>", "3️⃣", "2️⃣", "1️⃣"):
+        await safe_edit(message, frame)
+        await asyncio.sleep(1)
+    for revealed in range(0, logic.count_reveal_steps(result)):
+        await safe_edit(message, logic.format_draw_results(result, revealed=revealed))
+        await asyncio.sleep(1.2)
+
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Pannello di amministrazione del giveaway"""
     if not is_admin(update.effective_user.id):
@@ -971,7 +1061,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         message = (
             f"📊 <b>Statistiche Giveaway Fortnite</b>\n\n"
             f"👥 Utenti registrati: <b>{stats['total_users']}</b>\n"
-            f"✅ Iscritti a tutti i 2 canali: <b>{stats['active_members']}</b>\n"
+            f"✅ Iscritti a tutti e 2 i canali: <b>{stats['active_members']}</b>\n"
             f"🔗 Referral validi attivi: <b>{stats['active_referrals']}</b> (su {stats['total_referrals']} totali)\n"
             f"🏆 Vincitori previsti: <b>7 vincitori</b>"
         )
@@ -1043,20 +1133,28 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         )
 
     elif data == "draw_winner_confirm":
+        keyboard = InlineKeyboardMarkup([[build_button("⬅️ Torna al Menu", callback_data="admin_menu", style=ButtonStyle.TRANSPARENT)]])
         result = db.get_draw_result()
+        is_new_draw = False
         if not result:
             await query.edit_message_text("⏳ <b>Estrazione in corso...</b> Verifico l'iscrizione dei vincitori ai canali.", parse_mode=ParseMode.HTML)
             result = await draw_verified_winners(context)
-            if result and not db.save_draw_result(result):
-                # Un'altra estrazione è stata salvata nel frattempo: mostra quella ufficiale
-                result = db.get_draw_result()
-        message = logic.format_draw_results(result)
-        keyboard = [[build_button("⬅️ Torna al Menu", callback_data="admin_menu", style=ButtonStyle.TRANSPARENT)]]
+            if result:
+                # Se un'altra estrazione è stata salvata nel frattempo, vale quella ufficiale
+                is_new_draw = db.save_draw_result(result)
+                if not is_new_draw:
+                    result = db.get_draw_result()
+
+        if result and is_new_draw and config.ANIMATIONS_ENABLED:
+            await reveal_draw_animated(context, query.message, result)
+
         await query.edit_message_text(
-            message,
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            logic.format_draw_results(result),
+            reply_markup=keyboard,
             parse_mode=ParseMode.HTML
         )
+        if result and is_new_draw:
+            await send_animated(context.bot, user_id, "🎉 <b>Estrazione completata e salvata!</b>", config.EFFECT_CONFETTI)
 
     elif data == "admin_menu":
         context.user_data.pop('awaiting_broadcast_message', None)

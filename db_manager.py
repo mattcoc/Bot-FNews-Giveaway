@@ -247,7 +247,7 @@ class DatabaseManager:
         """Recupera la lista dettagliata degli utenti invitati"""
         conn = self.get_connection()
         rows = conn.cursor().execute("""
-            SELECT u.username, u.first_name, u.is_channel_member, rt.is_valid_new_member, rt.referred_id
+            SELECT u.username, u.first_name, u.is_channel_member, rt.is_valid_new_member, rt.referred_id, rt.activated_at
             FROM referral_tracking rt JOIN users u ON rt.referred_id = u.user_id
             WHERE rt.referrer_id = ?
             ORDER BY u.joined_at DESC
