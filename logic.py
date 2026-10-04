@@ -1,0 +1,764 @@
+"""
+Logica di business per il giveaway Fortnite (7 Vincitori, Multi-canale e Sistema Biglietti)
+"""
+
+import random
+import logging
+from typing import Optional, List, Dict
+import config
+from db_manager import DatabaseManager
+
+logger = logging.getLogger(__name__)
+
+
+def _escape_html(text: str) -> str:
+    """Escapa caratteri speciali per HTML Telegram."""
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _escape_html_attr(text: str) -> str:
+    """Escapa testo per attributi HTML (es. text= su tg-button copy_text)."""
+    return _escape_html(text).replace('"', "&quot;")
+
+
+def _rich_copy_link_row(bot_link: str, label: str = "📋 Copia link referral") -> str:
+    """Riga tg-button per copiare il link referral con un solo tocco."""
+    safe_link = _escape_html_attr(bot_link)
+    return (
+        '<tg-button-row>\n'
+        f'  <tg-button type="copy_text" style="success" text="{safe_link}">{label}</tg-button>\n'
+        "</tg-button-row>"
+    )
+
+
+class GiveawayLogic:
+    """Gestisce la logica di calcolo, probabilità, estrazione e classifica del giveaway"""
+    
+    def __init__(self, db: DatabaseManager):
+        self.db = db
+    
+    def generate_referral_code(self, user_id: int) -> str:
+        """Genera un codice referral unico basato sull'user_id"""
+        return f"ref_{user_id}_{random.randint(1000, 9999)}"
+
+    def get_referral_link(self, user_id: int) -> Optional[str]:
+        """Link t.me/start con codice referral dell'utente."""
+        user = self.db.get_user(user_id)
+        if not user:
+            return None
+        return f"https://t.me/{config.BOT_USERNAME.replace('@', '')}?start={user['referral_code']}"
+    
+    def calculate_points(self, user_id: int) -> dict:
+        """
+        Calcola i biglietti e punti di un utente nel nuovo format:
+        - 1 biglietto base garantito per l'iscrizione ai 2 canali (inclusività totale)
+        - +1 biglietto per ogni amico invitato valido e attivo
+        - Punti classifica per determinare il Primo Classificato
+        """
+        user = self.db.get_user(user_id)
+        is_member = bool(user['is_channel_member']) if user else False
+        referral_count = self.db.count_active_referrals(user_id)
+        
+        is_qualified = is_member
+        
+        base_tickets = config.BASE_TICKETS if is_qualified else 0
+        referral_tickets = (referral_count * config.TICKETS_PER_REFERRAL) if is_qualified else 0
+        total_tickets = base_tickets + referral_tickets
+        total_points = referral_count * config.POINTS_PER_REFERRAL
+        
+        return {
+            'is_member': is_member,
+            'is_qualified': is_qualified,
+            'referral_count': referral_count,
+            'base_tickets': base_tickets,
+            'referral_tickets': referral_tickets,
+            'total_tickets': total_tickets,
+            'total_points': total_points,
+        }
+    
+    def calculate_win_probability(self, user_id: int) -> float:
+        """Calcola la percentuale di probabilità nell'estrazione a sorte in base ai biglietti posseduti"""
+        participants = self.db.get_all_participants()
+        
+        total_tickets_all = 0
+        user_tickets = 0
+        
+        for p in participants:
+            if p.get('is_channel_member', 0) == 1:
+                pts = self.calculate_points(p['user_id'])
+                total_tickets_all += pts['total_tickets']
+                if p['user_id'] == user_id:
+                    user_tickets = pts['total_tickets']
+        
+        if total_tickets_all == 0 or user_tickets == 0:
+            return 0.0
+        
+        prob = (user_tickets / total_tickets_all) * 100
+        return round(prob, 2)
+    
+    def get_user_stats_message(self, user_id: int) -> str:
+        """Genera il messaggio completo dello stato utente"""
+        user = self.db.get_user(user_id)
+        if not user:
+            return "❌ Utente non trovato. Usa /start per registrarti."
+        
+        pts = self.calculate_points(user_id)
+        rank = self.db.get_user_rank(user_id)
+        prob = self.calculate_win_probability(user_id)
+        bot_link = f"https://t.me/{config.BOT_USERNAME.replace('@', '')}?start={user['referral_code']}"
+        
+        if pts['is_qualified']:
+            participation_status = "✅ <b>SEI QUALIFICATO PER L'ESTRAZIONE!</b>"
+        else:
+            participation_status = "❌ <b>PARTECIPAZIONE IN PAUSA (Unisciti a tutti e 2 i canali)</b>"
+            
+        return config.MESSAGES['stats'].format(
+            participation_status=participation_status,
+            link=bot_link,
+            referrals=pts['referral_count'],
+            base_tickets=pts['base_tickets'],
+            referral_tickets=pts['referral_tickets'],
+            total_tickets=pts['total_tickets'],
+            rank=rank,
+            win_probability=prob
+        )
+
+    def format_user_stats_rich_html(self, user_id: int) -> str:
+        """Stato utente in Rich Message HTML (tabelle e sezioni strutturate)."""
+        user = self.db.get_user(user_id)
+        if not user:
+            return "<p>❌ Utente non trovato. Usa /start per registrarti.</p>"
+
+        pts = self.calculate_points(user_id)
+        rank = self.db.get_user_rank(user_id)
+        prob = self.calculate_win_probability(user_id)
+        bot_link = self.get_referral_link(user_id) or ""
+
+        if pts['is_qualified']:
+            status_line = "✅ <b>SEI QUALIFICATO PER L'ESTRAZIONE!</b>"
+        else:
+            status_line = "❌ <b>PARTECIPAZIONE IN PAUSA</b> — unisciti a tutti e 2 i canali"
+
+        table = (
+            "<table bordered striped compact>\n"
+            "  <caption>🎟️ Biglietti e posizione</caption>\n"
+            "  <tr><th align=\"left\">Voce</th><th align=\"center\">Valore</th></tr>\n"
+            f"  <tr><td>Biglietto iscrizione ai 2 canali</td><td align=\"center\"><b>{pts['base_tickets']}</b></td></tr>\n"
+            f"  <tr><td>Amici invitati validi</td><td align=\"center\"><b>{pts['referral_count']}</b></td></tr>\n"
+            f"  <tr><td>Biglietti da inviti</td><td align=\"center\"><b>+{pts['referral_tickets']}</b></td></tr>\n"
+            f"  <tr><td><b>Biglietti totali nell'urna</b></td><td align=\"center\"><b>{pts['total_tickets']}</b></td></tr>\n"
+            f"  <tr><td>Posizione in classifica</td><td align=\"center\"><b>#{rank}</b></td></tr>\n"
+            f"  <tr><td>Probabilità estrazione a sorte</td><td align=\"center\"><b>~{prob}%</b></td></tr>\n"
+            "</table>"
+        )
+
+        return (
+            "<h2>📊 Il Tuo Stato nel Giveaway</h2>\n"
+            f"<p>{status_line}</p>\n"
+            "<hr/>\n"
+            "<h3>🔗 Il tuo link referral</h3>\n"
+            f"<pre><code>{_escape_html(bot_link)}</code></pre>\n"
+            f"{_rich_copy_link_row(bot_link)}\n"
+            "<p><i>Condividi questo link per scalare la classifica e aumentare le tue chance!</i></p>\n"
+            f"{table}\n"
+            "<blockquote>👥 Se vieni estratto tra i 5 vincitori, <b>1 dei tuoi invitati</b> vincerà un premio con te!</blockquote>"
+        )
+
+    def format_user_referrals_rich_html(self, user_id: int) -> str:
+        """Lista inviti referral in Rich Message HTML."""
+        user = self.db.get_user(user_id)
+        if not user:
+            return "<p>❌ Utente non trovato. Usa /start per registrarti.</p>"
+
+        bot_link = self.get_referral_link(user_id) or ""
+        referrals = self.db.get_referral_details(user_id)
+
+        link_block = (
+            "<h3>🔗 Il tuo link personale</h3>\n"
+            f"<pre><code>{_escape_html(bot_link)}</code></pre>\n"
+            f"{_rich_copy_link_row(bot_link)}\n"
+            "<p><b>Ogni amico che si unisce ai 2 canali = +1 biglietto extra!</b><br/>"
+            "Se vinci tu tra i 5 estratti a sorte, <b>uno dei tuoi amici vince con te</b>.</p>"
+        )
+
+        if not referrals:
+            return (
+                "<h2>👥 I Tuoi Inviti Referral</h2>\n"
+                "<p>❌ Non hai ancora invitato nessun amico!</p>\n"
+                "<hr/>\n"
+                f"{link_block}\n"
+                "<footer>Condividilo su Telegram, WhatsApp, Discord, TikTok, ecc.</footer>"
+            )
+
+        counts = {'active': 0, 'inactive': 0, 'invalid': 0}
+        rows = ""
+        for ref in referrals:
+            username = f"@{ref['username']}" if ref['username'] else ref['first_name']
+            username = _escape_html(username)
+            if ref['is_valid_new_member'] == 0:
+                status = "⚠️ Non valido (già iscritto)"
+                counts['invalid'] += 1
+            elif ref['is_channel_member'] == 1:
+                status = "✅ Attivo (+1 biglietto)"
+                counts['active'] += 1
+            else:
+                status = "❌ Inattivo (canale lasciato)"
+                counts['inactive'] += 1
+            rows += f"  <tr><td align=\"left\"><b>{username}</b></td><td align=\"left\">{status}</td></tr>\n"
+
+        summary = (
+            "<table bordered compact>\n"
+            "  <caption>📊 Riepilogo inviti</caption>\n"
+            "  <tr><th align=\"left\">Stato</th><th align=\"center\">Conteggio</th></tr>\n"
+            f"  <tr><td>✅ Validi e attivi</td><td align=\"center\"><b>{counts['active']}</b></td></tr>\n"
+            f"  <tr><td>❌ Inattivi</td><td align=\"center\"><b>{counts['inactive']}</b></td></tr>\n"
+        )
+        if counts['invalid'] > 0:
+            summary += f"  <tr><td>⚠️ Non validi</td><td align=\"center\"><b>{counts['invalid']}</b></td></tr>\n"
+        summary += "</table>"
+
+        friends_table = (
+            "<table bordered striped compact>\n"
+            "  <caption>📋 Amici invitati</caption>\n"
+            "  <tr><th align=\"left\">Amico</th><th align=\"left\">Stato</th></tr>\n"
+            f"{rows}"
+            "</table>"
+        )
+
+        return (
+            "<h2>👥 I Tuoi Inviti Referral</h2>\n"
+            "<hr/>\n"
+            f"{link_block}\n"
+            "<hr/>\n"
+            f"{friends_table}\n"
+            f"{summary}"
+        )
+
+    @staticmethod
+    def format_help_rich_html() -> str:
+        """Guida al giveaway in Rich Message HTML."""
+        return (
+            "<h2>ℹ️ Come Funziona il Giveaway a 7 Vincitori</h2>\n"
+            "<p>Abbiamo rinnovato il format per renderlo <b>inclusivo, meritocratico e senza frizione</b>!</p>\n"
+            "<hr/>\n"
+            "<h3>🎯 Come partecipare</h3>\n"
+            "<ol>\n"
+            "  <li>Iscriviti a tutti e 2 i canali ufficiali:\n"
+            "    <ul>\n"
+            '      <li><a href="https://t.me/FortniteNews">@FortniteNews</a></li>\n'
+            '      <li><a href="https://t.me/FortniteBundles">@FortniteBundles</a></li>\n'
+            "    </ul>\n"
+            "  </li>\n"
+            "  <li>Ottieni subito <b>1 biglietto garantito</b> per l'estrazione!</li>\n"
+            "</ol>\n"
+            "<hr/>\n"
+            "<h3>🏆 I 7 vincitori in palio</h3>\n"
+            "<blockquote><b>🥇 1. Primo classificato (Top Referrer)</b><br/>"
+            "Chi invita più amici vince direttamente il 1° premio. Nessun limite agli inviti!</blockquote>\n"
+            "<blockquote><b>🎲 2–6. Cinque estratti a sorte</b><br/>"
+            "Estrazione ponderata sui biglietti: ogni amico invitato = <b>+1 biglietto</b> nell'urna.</blockquote>\n"
+            "<blockquote><b>👥 7. Un amico tra gli invitati dei 5 estratti</b><br/>"
+            "Tra gli amici invitati dai 5 vincitori sorteggiati viene estratto <b>1 vincitore bonus</b>. "
+            "Se vinci tu tra i 5, <b>fai vincere anche un tuo amico</b>!</blockquote>\n"
+            "<hr/>\n"
+            "<h3>🔗 Come invitare amici</h3>\n"
+            "<p>Copia il link personale da <b>📊 Il Mio Stato</b> e condividilo ovunque "
+            "(Telegram, WhatsApp, Instagram, TikTok, Discord, ecc.).</p>\n"
+            "<p><i>Valgono solo le nuove iscrizioni che completano l'accesso ai 2 canali.</i></p>\n"
+            "<footer>Buona fortuna a tutti! 🍀</footer>"
+        )
+
+    def format_user_referrals_text_fallback(self, user_id: int) -> str:
+        """Fallback HTML classico per la schermata inviti."""
+        user = self.db.get_user(user_id)
+        if not user:
+            return "❌ Utente non trovato. Usa /start per registrarti."
+
+        bot_link = f"https://t.me/{config.BOT_USERNAME.replace('@', '')}?start={user['referral_code']}"
+        referrals = self.db.get_referral_details(user_id)
+
+        if not referrals:
+            return f"""👥 <b>I Tuoi Inviti Referral</b>
+
+❌ Non hai ancora invitato nessun amico!
+
+┏━━━━━━━━━━━━━━━━━━━━━
+🔗 <b>IL TUO LINK PERSONALE:</b>
+
+<code>{bot_link}</code>
+
+💡 <b>Ogni amico che si unisce ai 2 canali = +1 Biglietto extra!</b>
+Inoltre, se vinci tu tra i 5 estratti a sorte, <b>uno dei tuoi amici vince con te!</b>
+┗━━━━━━━━━━━━━━━━━━━━━
+
+Condividilo su Telegram, WhatsApp, Discord, TikTok, ecc."""
+
+        message = f"""👥 <b>I Tuoi Inviti Referral</b>
+
+┏━━━━━━━━━━━━━━━━━━━━━
+🔗 <b>IL TUO LINK PERSONALE:</b>
+
+<code>{bot_link}</code>
+┗━━━━━━━━━━━━━━━━━━━━━
+
+<b>📋 Lista degli amici invitati:</b>\n\n"""
+        counts = {'active': 0, 'inactive': 0, 'invalid': 0}
+        for ref in referrals:
+            username = f"@{ref['username']}" if ref['username'] else ref['first_name']
+            if ref['is_valid_new_member'] == 0:
+                status = "⚠️ Non valido (già iscritto ai canali)"
+                counts['invalid'] += 1
+            elif ref['is_channel_member'] == 1:
+                status = "✅ Attivo (+1 Biglietto)"
+                counts['active'] += 1
+            else:
+                status = "❌ Inattivo (ha lasciato uno dei canali)"
+                counts['inactive'] += 1
+            message += f"• <b>{username}</b>: {status}\n"
+
+        message += f"\n<b>📊 Riepilogo:</b>\n"
+        message += f"✅ Validi e attivi: <b>{counts['active']}</b>\n"
+        message += f"❌ Inattivi: <b>{counts['inactive']}</b>"
+        if counts['invalid'] > 0:
+            message += f"\n⚠️ Non validi: <b>{counts['invalid']}</b>"
+        return message
+    
+    def draw_7_winners(self) -> Optional[dict]:
+        """
+        Estrae i 7 Vincitori secondo il regolamento:
+        1. 🥇 Primo Classificato (Top Referrer)
+        2. 🎲 5 Estratti a Sorte (estrazione ponderata sui biglietti)
+        3. 👥 1 Amico tra gli invitati referral dei 5 estratti a sorte
+        """
+        participants = self.db.get_all_participants()
+        
+        qualified = []
+        for p in participants:
+            if p.get('is_channel_member', 0) == 1:
+                pts = self.calculate_points(p['user_id'])
+                qualified.append({
+                    'user_id': p['user_id'],
+                    'username': p.get('username'),
+                    'first_name': p.get('first_name'),
+                    'joined_at': p.get('joined_at'),
+                    'referral_count': pts['referral_count'],
+                    'total_tickets': pts['total_tickets'],
+                    'total_points': pts['total_points']
+                })
+        
+        if not qualified:
+            return None
+        
+        total_tickets = sum(p['total_tickets'] for p in qualified)
+        
+        # 1. PRIMO CLASSIFICATO (Top Referrer)
+        qualified_sorted = sorted(qualified, key=lambda x: (-x['referral_count'], x['joined_at']))
+        first_place = qualified_sorted[0]
+        
+        draw_pool = [p for p in qualified if p['user_id'] != first_place['user_id']]
+        
+        # 2. 5 ESTRATTI A SORTE (Ponderati)
+        drawn_winners = []
+        num_to_draw = min(config.DRAWN_WINNERS_COUNT, len(draw_pool))
+        
+        remaining_pool = list(draw_pool)
+        for _ in range(num_to_draw):
+            if not remaining_pool:
+                break
+            weighted_list = [p for p in remaining_pool for _ in range(max(1, p['total_tickets']))]
+            winner = random.choice(weighted_list)
+            drawn_winners.append(winner)
+            remaining_pool = [p for p in remaining_pool if p['user_id'] != winner['user_id']]
+        
+        # 3. 1 AMICO TRA GLI INVITATI DEI 5 ESTRATTI
+        drawn_user_ids = [w['user_id'] for w in drawn_winners]
+        friends_candidates = self.db.get_active_referrals_of_users(drawn_user_ids)
+        
+        existing_winner_ids = {first_place['user_id']} | {w['user_id'] for w in drawn_winners}
+        eligible_friends = [f for f in friends_candidates if f['referred_id'] not in existing_winner_ids]
+        
+        referral_winner = None
+        if eligible_friends:
+            chosen_friend = random.choice(eligible_friends)
+            referral_winner = {
+                'user_id': chosen_friend['referred_id'],
+                'username': chosen_friend.get('username'),
+                'first_name': chosen_friend.get('first_name'),
+                'invited_by_id': chosen_friend['referrer_id'],
+                'invited_by_username': chosen_friend.get('referrer_username'),
+                'invited_by_name': chosen_friend.get('referrer_first_name'),
+                'is_fallback': False
+            }
+        else:
+            fallback_candidates = [p for p in remaining_pool if p['user_id'] not in existing_winner_ids]
+            if fallback_candidates:
+                chosen_fallback = random.choice(fallback_candidates)
+                referral_winner = {
+                    'user_id': chosen_fallback['user_id'],
+                    'username': chosen_fallback.get('username'),
+                    'first_name': chosen_fallback.get('first_name'),
+                    'invited_by_id': None,
+                    'invited_by_username': None,
+                    'invited_by_name': None,
+                    'is_fallback': True
+                }
+        
+        return {
+            'first_place': first_place,
+            'drawn_winners': drawn_winners,
+            'referral_winner': referral_winner,
+            'total_qualified': len(qualified),
+            'total_tickets': total_tickets
+        }
+    
+    def format_draw_results(self, result: dict) -> str:
+        """Formatta i risultati dell'estrazione dei 7 vincitori per l'annuncio"""
+        if not result:
+            return "❌ <b>Nessun partecipante qualificato trovato per l'estrazione.</b>"
+            
+        fp = result['first_place']
+        drawn = result['drawn_winners']
+        ref_w = result['referral_winner']
+        
+        fp_name = f"@{fp['username']}" if fp.get('username') else (fp.get('first_name') or f"ID: {fp['user_id']}")
+        
+        msg = "🎉 <b>ESTRAZIONE DEI 7 VINCITORI COMPLETATA!</b> 🎉\n\n"
+        msg += f"📊 <b>Partecipanti qualificati:</b> {result['total_qualified']}\n"
+        msg += f"🎟️ <b>Biglietti totali nell'urna:</b> {result['total_tickets']}\n\n"
+        
+        msg += "┏━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += "🥇 <b>1° CLASSIFICATO (TOP REFERRER)</b>\n"
+        msg += f"🏆 <b>{fp_name}</b> (<code>{fp['user_id']}</code>)\n"
+        msg += f"👥 Inviti validi portati: <b>{fp['referral_count']}</b>\n"
+        msg += "┗━━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        msg += "┏━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += "🎲 <b>I 5 ESTRATTI A SORTE:</b>\n"
+        medals = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+        for i, w in enumerate(drawn):
+            w_name = f"@{w['username']}" if w.get('username') else (w.get('first_name') or f"ID: {w['user_id']}")
+            msg += f"{medals[i]} <b>{w_name}</b> (<code>{w['user_id']}</code>) • 🎟️ {w['total_tickets']} biglietti\n"
+        msg += "┗━━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        msg += "┏━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += "👥 <b>1 AMICO TRA GLI INVITATI DEI 5 ESTRATTI</b>\n"
+        if ref_w:
+            ref_name = f"@{ref_w['username']}" if ref_w.get('username') else (ref_w.get('first_name') or f"ID: {ref_w['user_id']}")
+            if not ref_w.get('is_fallback'):
+                inv_name = f"@{ref_w['invited_by_username']}" if ref_w.get('invited_by_username') else (ref_w.get('invited_by_name') or f"ID: {ref_w['invited_by_id']}")
+                msg += f"🎁 <b>{ref_name}</b> (<code>{ref_w['user_id']}</code>)\n"
+                msg += f"🔗 <i>Invitato dal vincitore estratto:</i> <b>{inv_name}</b>! 🥳\n"
+            else:
+                msg += f"🎁 <b>{ref_name}</b> (<code>{ref_w['user_id']}</code>) <i>(Estratto tra i partecipanti di riserva)</i>\n"
+        else:
+            msg += "<i>Nessun amico o riserva idoneo disponibile.</i>\n"
+        msg += "┗━━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        msg += "✨ <i>I vincitori verranno contattati a breve! Congratulazioni a tutti!</i> 🎁"
+        return msg
+    
+    def get_leaderboard(self, limit: int = 10) -> List[dict]:
+        """Ottiene la classifica ordinata per numero di inviti / punti"""
+        participants = self.db.get_all_participants()
+        leaderboard = []
+        
+        for p in participants:
+            pts = self.calculate_points(p['user_id'])
+            leaderboard.append({
+                'user_id': p['user_id'],
+                'username': p.get('username'),
+                'first_name': p.get('first_name'),
+                'joined_at': p.get('joined_at'),
+                'referrals': pts['referral_count'],
+                'total_tickets': pts['total_tickets'],
+                'total_points': pts['total_points'],
+                'is_qualified': pts['is_qualified']
+            })
+        
+        leaderboard.sort(key=lambda x: (-x['referrals'], x['joined_at']))
+        return leaderboard[:limit]
+    
+    def format_leaderboard(self, leaderboard: List[dict]) -> str:
+        """Formatta la classifica per la visualizzazione all'utente"""
+        if not leaderboard:
+            return "🏆 <b>Classifica Giveaway</b>\n\n❌ Nessun partecipante registrato al momento."
+        
+        message = "🏆 <b>CLASSIFICA INVITI - GIVEAWAY FORTNITE</b>\n\n"
+        message += "<i>Il 1° Classificato vince direttamente il Primo Premio!</i>\n\n"
+        message += "┏━━━━━━━━━━━━━━━━━━━━━\n"
+        medals = ["🥇", "🥈", "🥉"]
+        
+        for i, p in enumerate(leaderboard, 1):
+            medal = medals[i-1] if i <= 3 else f"<b>{i}.</b>"
+            name = f"@{p['username']}" if p.get('username') else (p.get('first_name') or f"Utente {p['user_id']}")
+            
+            badge = " 👑 <b>(1° Posto)</b>" if i == 1 else ""
+            status_icon = "✅" if p['is_qualified'] else "⚠️"
+            
+            message += f"{medal} <b>{name}</b>{badge}\n"
+            message += f"     👥 <b>{p['referrals']}</b> inviti validi • 🎟️ <b>{p['total_tickets']}</b> biglietti {status_icon}\n\n"
+        
+        message += "┗━━━━━━━━━━━━━━━━━━━━━\n"
+        message += "✅ = Iscritto a tutti e 2 i canali (Qualificato)\n"
+        message += "⚠️ = Canali mancanti (Inviti congelati)\n\n"
+        message += "💡 <i>Continua a condividere il tuo link per scalare la classifica!</i>"
+        return message
+
+    def format_leaderboard_rich_html(
+        self,
+        leaderboard: List[dict],
+        user_id: Optional[int] = None,
+        is_admin: bool = False,
+        include_buttons: bool = True
+    ) -> str:
+        """
+        Formatta la classifica per la visualizzazione tramite Telegram Rich Messages HTML.
+        Include supporto a tabelle native Telegram (<table bordered striped compact>),
+        medaglie, evidenziazione del partecipante e bottoni interni (<tg-button-row>).
+        """
+        title = "🏆 <b>CLASSIFICA INVITI - PANNELLO ADMIN</b>" if is_admin else "🏆 <b>CLASSIFICA INVITI - GIVEAWAY FORTNITE</b>"
+
+        if not leaderboard:
+            msg = f"{title}\n\n❌ Nessun partecipante registrato al momento."
+            if include_buttons:
+                if is_admin:
+                    msg += (
+                        '\n\n<tg-button-row align="center">\n'
+                        '  <tg-button callback_data="admin_stats" type="callback_data" data="admin_stats">📊 Statistiche</tg-button>\n'
+                        '  <tg-button callback_data="admin_leaderboard" type="callback_data" data="admin_leaderboard">🔄 Aggiorna</tg-button>\n'
+                        '</tg-button-row>\n'
+                        '<tg-button-row align="center">\n'
+                        '  <tg-button callback_data="admin_menu" type="callback_data" data="admin_menu">⬅️ Torna Indietro</tg-button>\n'
+                        '</tg-button-row>'
+                    )
+                else:
+                    msg += (
+                        '\n\n<tg-button-row align="center">\n'
+                        '  <tg-button callback_data="user_stats" type="callback_data" data="user_stats">📊 Il Mio Stato</tg-button>\n'
+                        '  <tg-button callback_data="user_referrals" type="callback_data" data="user_referrals">👥 I Miei Inviti</tg-button>\n'
+                        '</tg-button-row>\n'
+                        '<tg-button-row align="center">\n'
+                        '  <tg-button callback_data="user_leaderboard" type="callback_data" data="user_leaderboard">🔄 Aggiorna</tg-button>\n'
+                        '  <tg-button callback_data="main_menu" type="callback_data" data="main_menu">🔙 Menu Principale</tg-button>\n'
+                        '</tg-button-row>'
+                    )
+            return msg
+
+        header_desc = "<i>Pannello di controllo graduatoria partecipanti:</i>" if is_admin else "<i>Il 1° Classificato vince direttamente il Primo Premio!</i>"
+
+        table_html = (
+            "<table bordered striped compact>\n"
+            "  <tr>\n"
+            '    <th align="center"><b>#</b></th>\n'
+            '    <th align="left"><b>Partecipante</b></th>\n'
+            '    <th align="center"><b>Inviti</b></th>\n'
+            '    <th align="center"><b>Ticket</b></th>\n'
+            '    <th align="center"><b>Stato</b></th>\n'
+            "  </tr>\n"
+        )
+
+        for i, p in enumerate(leaderboard, 1):
+            if i == 1:
+                pos_str = "🥇 1"
+            elif i == 2:
+                pos_str = "🥈 2"
+            elif i == 3:
+                pos_str = "🥉 3"
+            else:
+                pos_str = str(i)
+
+            raw_name = f"@{p['username']}" if p.get('username') else (p.get('first_name') or f"Utente {p['user_id']}")
+
+            name_parts = []
+            is_current = (user_id is not None and p['user_id'] == user_id)
+            if is_current:
+                name_parts.append("⭐️")
+            name_parts.append(raw_name)
+            if i == 1:
+                name_parts.append("👑")
+            if is_current:
+                name_parts.append("(Tu)")
+
+            display_name = " ".join(name_parts)
+            status_icon = "✅" if p.get('is_qualified') else "⚠️"
+
+            table_html += (
+                "  <tr>\n"
+                f'    <td align="center">{pos_str}</td>\n'
+                f'    <td align="left">{display_name}</td>\n'
+                f'    <td align="center">{p.get("referrals", 0)}</td>\n'
+                f'    <td align="center">{p.get("total_tickets", 0)}</td>\n'
+                f'    <td align="center">{status_icon}</td>\n'
+                "  </tr>\n"
+            )
+
+        table_html += "</table>"
+
+        legend = (
+            "✅ = Iscritto a tutti e 2 i canali (Qualificato)\n"
+            "⚠️ = Canali mancanti (Inviti congelati)"
+        )
+
+        msg = f"{title}\n\n{header_desc}\n\n{table_html}\n\n{legend}"
+
+        if include_buttons:
+            if is_admin:
+                buttons_html = (
+                    '<tg-button-row align="center">\n'
+                    '  <tg-button callback_data="admin_stats" type="callback_data" data="admin_stats">📊 Statistiche</tg-button>\n'
+                    '  <tg-button callback_data="admin_leaderboard" type="callback_data" data="admin_leaderboard">🔄 Aggiorna</tg-button>\n'
+                    '</tg-button-row>\n'
+                    '<tg-button-row align="center">\n'
+                    '  <tg-button callback_data="admin_menu" type="callback_data" data="admin_menu">⬅️ Torna Indietro</tg-button>\n'
+                    '</tg-button-row>'
+                )
+            else:
+                buttons_html = (
+                    '<tg-button-row align="center">\n'
+                    '  <tg-button callback_data="user_stats" type="callback_data" data="user_stats">📊 Il Mio Stato</tg-button>\n'
+                    '  <tg-button callback_data="user_referrals" type="callback_data" data="user_referrals">👥 I Miei Inviti</tg-button>\n'
+                    '</tg-button-row>\n'
+                    '<tg-button-row align="center">\n'
+                    '  <tg-button callback_data="user_leaderboard" type="callback_data" data="user_leaderboard">🔄 Aggiorna</tg-button>\n'
+                    '  <tg-button callback_data="main_menu" type="callback_data" data="main_menu">🔙 Menu Principale</tg-button>\n'
+                    '</tg-button-row>'
+                )
+            msg += f"\n\n{buttons_html}"
+
+        return msg
+
+    def format_leaderboard_text_fallback(
+        self,
+        leaderboard: List[dict],
+        user_id: Optional[int] = None,
+        is_admin: bool = False
+    ) -> str:
+        """
+        Formatta la classifica come tabella monospace in formato <pre>
+        per garantire retrocompatibilità totale con client che non supportano tabelle native.
+        """
+        title = "🏆 <b>CLASSIFICA INVITI - PANNELLO ADMIN</b>" if is_admin else "🏆 <b>CLASSIFICA INVITI - GIVEAWAY FORTNITE</b>"
+
+        if not leaderboard:
+            return f"{title}\n\n❌ Nessun partecipante registrato al momento."
+
+        header_desc = "<i>Pannello di controllo graduatoria partecipanti:</i>" if is_admin else "<i>Il 1° Classificato vince direttamente il Primo Premio!</i>"
+
+        rows = [
+            "┌────┬──────────────┬─────┬─────┬───┐",
+            "│ #  │ Partecipante │ Inv │ Tkt │St │",
+            "├────┼──────────────┼─────┼─────┼───┤"
+        ]
+
+        for i, p in enumerate(leaderboard, 1):
+            pos_str = f" {i:<2} " if i < 10 else f"{i:<3} "
+
+            raw_name = f"@{p['username']}" if p.get('username') else (p.get('first_name') or f"{p['user_id']}")
+            is_current = (user_id is not None and p['user_id'] == user_id)
+            if is_current:
+                raw_name = f"*{raw_name}"
+            name_cell = f" {raw_name[:12]:<12} "
+
+            inv_cell = f" {p.get('referrals', 0):>3} "
+            tkt_cell = f" {p.get('total_tickets', 0):>3} "
+            st_cell = "OK " if p.get('is_qualified') else "-- "
+
+            rows.append(f"│{pos_str}│{name_cell}│{inv_cell}│{tkt_cell}│{st_cell}│")
+
+        rows.append("└────┴──────────────┴─────┴─────┴───┘")
+        table_pre = "<pre>\n" + "\n".join(rows) + "\n</pre>"
+
+        legend = (
+            "OK = Iscritto a tutti e 2 i canali (Qualificato)\n"
+            "-- = Canali mancanti (Inviti congelati)"
+        )
+        if user_id:
+            legend += "\n* = Il tuo posizionamento"
+
+        return f"{title}\n\n{header_desc}\n\n{table_pre}\n\n{legend}"
+
+    def format_leaderboard_markdown(self, leaderboard: List[dict]) -> str:
+        """Formatta la classifica in formato tabella Markdown"""
+        lines = [
+            "| # | Partecipante | Inviti | Ticket | Stato |",
+            "|:---:|:---|:---:|:---:|:---:|",
+        ]
+        for i, p in enumerate(leaderboard, 1):
+            pos = "🥇 1" if i == 1 else ("🥈 2" if i == 2 else ("🥉 3" if i == 3 else str(i)))
+            name = f"@{p['username']}" if p.get('username') else (p.get('first_name') or f"Utente {p['user_id']}")
+            status = "✅" if p.get('is_qualified') else "⚠️"
+            lines.append(f"| {pos} | {name} | {p.get('referrals', 0)} | {p.get('total_tickets', 0)} | {status} |")
+        return "\n".join(lines)
+
+    def format_leaderboard_rich_blocks(self, leaderboard: List[dict], is_admin: bool = False) -> List[dict]:
+        """Formatta la classifica come blocchi strutturati per Telegram Rich Messages"""
+        blocks = [
+            {
+                "type": "section_heading",
+                "text": "🏆 CLASSIFICA INVITI - PANNELLO ADMIN" if is_admin else "🏆 CLASSIFICA INVITI - GIVEAWAY FORTNITE"
+            }
+        ]
+
+        table_rows = [
+            [
+                {"text": "#", "align": "center", "header": True},
+                {"text": "Partecipante", "align": "left", "header": True},
+                {"text": "Inviti", "align": "center", "header": True},
+                {"text": "Ticket", "align": "center", "header": True},
+                {"text": "Stato", "align": "center", "header": True},
+            ]
+        ]
+
+        for i, p in enumerate(leaderboard, 1):
+            pos = "🥇 1" if i == 1 else ("🥈 2" if i == 2 else ("🥉 3" if i == 3 else str(i)))
+            name = f"@{p['username']}" if p.get('username') else (p.get('first_name') or f"Utente {p['user_id']}")
+            table_rows.append([
+                {"text": pos, "align": "center"},
+                {"text": name, "align": "left"},
+                {"text": str(p.get("referrals", 0)), "align": "center"},
+                {"text": str(p.get("total_tickets", 0)), "align": "center"},
+                {"text": "✅" if p.get("is_qualified") else "⚠️", "align": "center"}
+            ])
+
+        blocks.append({
+            "type": "table",
+            "bordered": True,
+            "striped": True,
+            "compact": True,
+            "rows": table_rows
+        })
+
+        if is_admin:
+            buttons_block = {
+                "type": "buttons",
+                "rows": [
+                    [
+                        {"text": "📊 Statistiche", "callback_data": "admin_stats"},
+                        {"text": "🔄 Aggiorna", "callback_data": "admin_leaderboard"}
+                    ],
+                    [
+                        {"text": "⬅️ Torna Indietro", "callback_data": "admin_menu"}
+                    ]
+                ]
+            }
+        else:
+            buttons_block = {
+                "type": "buttons",
+                "rows": [
+                    [
+                        {"text": "📊 Il Mio Stato", "callback_data": "user_stats"},
+                        {"text": "👥 I Miei Inviti", "callback_data": "user_referrals"}
+                    ],
+                    [
+                        {"text": "🔄 Aggiorna", "callback_data": "user_leaderboard"},
+                        {"text": "🔙 Menu Principale", "callback_data": "main_menu"}
+                    ]
+                ]
+            }
+        blocks.append(buttons_block)
+        return blocks
