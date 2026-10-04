@@ -9,7 +9,10 @@ import time
 import asyncio
 from typing import Optional
 from urllib.parse import quote_plus
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CopyTextButton, ChatMember
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, CopyTextButton, ChatMember,
+    ReplyKeyboardMarkup, KeyboardButton, BotCommand, BotCommandScopeAllPrivateChats
+)
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, 
     CallbackQueryHandler, ContextTypes, filters, ChatMemberHandler
@@ -85,23 +88,35 @@ def is_admin(user_id: int) -> bool:
     """Verifica se l'utente è un amministratore configurato"""
     return user_id in config.ADMIN_IDS
 
-def get_main_menu_keyboard(
-    user_id: int,
-    *,
-    referral_link: Optional[str] = None,
-) -> InlineKeyboardMarkup:
-    """Genera la tastiera del menu principale utente con pulsanti colorati"""
-    keyboard = []
-    if referral_link:
-        keyboard.append([build_copy_referral_button(referral_link)])
-    keyboard.extend([
-        [build_button("📊 Il Mio Stato", callback_data="user_stats", style=ButtonStyle.PRIMARY)],
-        [build_button("👥 I Miei Inviti", callback_data="user_referrals", style=ButtonStyle.PRIMARY)],
-        [build_button("🏆 Classifica", callback_data="user_leaderboard", style=ButtonStyle.TRANSPARENT)],
-        [build_button("ℹ️ Come Funziona", callback_data="user_help", style=ButtonStyle.TRANSPARENT)],
-        [build_button("📢 Canale Ufficiale Fortnite News", url=config.CHANNEL_USERNAME)],
+def get_main_menu_keyboard() -> InlineKeyboardMarkup:
+    """Menu principale: poche scelte, grandi e chiare"""
+    return InlineKeyboardMarkup([
+        [build_button("📤 Invita amici (+1 biglietto)", callback_data="user_invite", style=ButtonStyle.SUCCESS)],
+        [build_button("📊 Il mio stato", callback_data="user_stats", style=ButtonStyle.PRIMARY)],
+        [
+            build_button("🏆 Classifica", callback_data="user_leaderboard", style=ButtonStyle.TRANSPARENT),
+            build_button("❓ Aiuto", callback_data="user_help", style=ButtonStyle.TRANSPARENT),
+        ],
     ])
-    return InlineKeyboardMarkup(keyboard)
+
+def get_reply_keyboard() -> ReplyKeyboardMarkup:
+    """Pulsanti fissi sotto la tastiera: restano sempre visibili, anche se i messaggi scorrono via"""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(config.BTN_STATUS), KeyboardButton(config.BTN_INVITE)],
+            [KeyboardButton(config.BTN_RANKING), KeyboardButton(config.BTN_HELP)],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Tocca un pulsante qui sotto 👇",
+    )
+
+def get_share_url(bot_link: str) -> str:
+    """Link t.me/share: apre la lista chat di Telegram con il messaggio d'invito già pronto"""
+    return f"https://t.me/share/url?url={quote_plus(bot_link)}&text={quote_plus(config.SHARE_TEXT)}"
+
+def back_to_menu_row() -> list:
+    return [build_button("🔙 Torna al menu", callback_data="main_menu", style=ButtonStyle.TRANSPARENT)]
 
 def get_admin_menu_keyboard() -> InlineKeyboardMarkup:
     """Genera la tastiera del pannello admin"""
@@ -157,21 +172,22 @@ async def check_user_channels_membership(bot, user_id: int) -> dict:
     }
 
 def get_channels_join_keyboard(channels_status: list) -> InlineKeyboardMarkup:
-    """Genera i pulsanti Link per i canali mancanti e il pulsante Verde di verifica"""
+    """Pulsanti per entrare nei canali mancanti e pulsante verde di controllo"""
     buttons = []
     for ch in channels_status:
         if not ch["is_member"]:
-            buttons.append([build_button(f"➕ Unisciti a {ch['name']}", url=ch["url"])])
-    buttons.append([build_button("🔄 Verifica Iscrizioni", callback_data="check_membership", style=ButtonStyle.SUCCESS)])
+            buttons.append([build_button(f"➕ Entra in {ch['name']}", url=ch["url"])])
+    buttons.append([build_button("✅ HO FATTO, CONTROLLA", callback_data="check_membership", style=ButtonStyle.SUCCESS)])
     return InlineKeyboardMarkup(buttons)
 
 def format_channels_list_text(channels_status: list) -> str:
-    """Formatta la lista dei canali con stato visivo (✅ / ❌)"""
+    """Lista canali con stato chiaro: fatto / da fare"""
     lines = []
     for ch in channels_status:
-        icon = "✅" if ch["is_member"] else "❌"
-        status_label = "Iscritto" if ch["is_member"] else "Non iscritto"
-        lines.append(f"{icon} <b>{ch['name']}</b> ({ch['username']}) - <i>{status_label}</i>")
+        if ch["is_member"]:
+            lines.append(f"✅ <b>{ch['name']}</b> – fatto!")
+        else:
+            lines.append(f"❌ <b>{ch['name']}</b> – <u>da fare</u>")
     return "\n".join(lines)
 
 def is_pre_existing_member(user_id: int, channels_status: list) -> bool:
@@ -284,13 +300,65 @@ async def track_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # USER COMMANDS
 # ============================================================================
 
+async def send_or_edit(update: Update, text: str, reply_markup=None) -> None:
+    """Modifica il messaggio se arriva da un pulsante inline, altrimenti ne invia uno nuovo"""
+    query = update.callback_query
+    if query and query.message:
+        try:
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+        except BadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                # Es. messaggio troppo vecchio o non modificabile: ne mandiamo uno nuovo
+                await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    else:
+        await update.effective_chat.send_message(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+
+async def send_channels_prompt(update: Update, membership: dict, invited: bool = False) -> None:
+    channels_list_txt = format_channels_list_text(membership['channels'])
+    template = config.MESSAGES['invited_channels_prompt'] if invited else config.MESSAGES['channels_prompt']
+    await send_or_edit(update, template.format(channels_list=channels_list_txt), get_channels_join_keyboard(membership['channels']))
+
+async def send_reply_keyboard(update: Update) -> None:
+    """Mostra i pulsanti fissi sotto la tastiera"""
+    await update.effective_chat.send_message(
+        config.MESSAGES['keyboard_hint'],
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_reply_keyboard(),
+    )
+
+def welcome_back_text(user_id: int) -> str:
+    pts = logic.calculate_points(user_id)
+    return config.MESSAGES['welcome_back'].format(
+        participation_status="✅ <b>Stai partecipando all'estrazione!</b>",
+        total_tickets=pts['total_tickets'],
+        referrals=pts['referral_count'],
+    )
+
+async def get_ready_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[dict]:
+    """
+    Restituisce l'utente se è registrato e iscritto a tutti i canali.
+    Altrimenti gli spiega cosa deve fare e restituisce None.
+    """
+    user_id = update.effective_user.id
+    user_info = db.get_user(user_id)
+    if not user_info:
+        await update.effective_chat.send_message(config.MESSAGES['not_registered'])
+        return None
+
+    membership = await check_user_channels_membership(context.bot, user_id)
+    await sync_membership(context, user_info, membership['all_joined'])
+    if not membership['all_joined']:
+        await send_channels_prompt(update, membership)
+        return None
+    return db.get_user(user_id)
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Gestisce il comando /start con supporto per referral e verifica multi-canale"""
     user = update.effective_user
 
     if not is_admin(user.id):
         if db.is_giveaway_ended():
-            await update.message.reply_text(config.MESSAGES['giveaway_ended'])
+            await update.message.reply_text(config.MESSAGES['giveaway_ended'], parse_mode=ParseMode.HTML)
             return
         if not db.is_giveaway_active():
             await update.message.reply_text(config.MESSAGES['giveaway_not_started'])
@@ -302,26 +370,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     existing_user = db.get_user(user.id)
     if existing_user:
         await sync_membership(context, existing_user, is_fully_joined)
-        
         if not is_fully_joined:
-            channels_list_txt = format_channels_list_text(membership['channels'])
-            msg = config.MESSAGES['channels_prompt'].format(channels_list=channels_list_txt)
-            await update.message.reply_text(
-                msg, 
-                parse_mode=ParseMode.HTML, 
-                reply_markup=get_channels_join_keyboard(membership['channels'])
-            )
+            await send_channels_prompt(update, membership)
         else:
-            bot_link = logic.get_referral_link(user.id)
-            status_text = "✅ <b>Sei qualificato per l'estrazione a 7 vincitori!</b>"
-            msg = config.MESSAGES['welcome_back'].format(
-                link=bot_link,
-                participation_status=status_text
-            )
+            await send_reply_keyboard(update)
             await update.message.reply_text(
-                msg,
+                welcome_back_text(user.id),
                 parse_mode=ParseMode.HTML,
-                reply_markup=get_main_menu_keyboard(user.id, referral_link=bot_link),
+                reply_markup=get_main_menu_keyboard(),
             )
         return
 
@@ -331,7 +387,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if referrer and referrer['user_id'] != user.id:
             referred_by = referrer['user_id']
         elif referrer:
-            await update.message.reply_text(config.MESSAGES['self_referral'])
+            await update.message.reply_text(config.MESSAGES['self_referral'], parse_mode=ParseMode.HTML)
 
     was_pre_existing = is_pre_existing_member(user.id, membership['channels'])
     referral_code = logic.generate_referral_code(user.id)
@@ -356,51 +412,27 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     if not is_fully_joined:
-        channels_list_txt = format_channels_list_text(membership['channels'])
-        msg_template = config.MESSAGES['invited_channels_prompt'] if referred_by else config.MESSAGES['channels_prompt']
-        await update.message.reply_text(
-            msg_template.format(channels_list=channels_list_txt),
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_channels_join_keyboard(membership['channels'])
-        )
+        await send_channels_prompt(update, membership, invited=bool(referred_by))
     else:
         if referred_by and not is_ineligible_referral:
             new_user = db.get_user(user.id)
             if new_user:
                 await notify_referrers(context, new_user, now_member=True)
 
-        bot_link = f"https://t.me/{config.BOT_USERNAME.replace('@', '')}?start={referral_code}"
-        msg = config.MESSAGES['welcome_new'].format(link=bot_link)
+        await send_reply_keyboard(update)
         await update.message.reply_text(
-            msg,
+            config.MESSAGES['welcome_new'].format(link=logic.get_referral_link(user.id)),
             parse_mode=ParseMode.HTML,
-            reply_markup=get_main_menu_keyboard(user.id, referral_link=bot_link),
+            reply_markup=get_main_menu_keyboard(),
         )
+
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_or_edit(update, config.MESSAGES['main_menu'], get_main_menu_keyboard())
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Mostra il menu principale"""
-    user_id = update.effective_user.id
-    user_info = db.get_user(user_id)
-    if not user_info:
-        await update.message.reply_text("❌ Usa /start per registrarti al giveaway.")
-        return
-
-    membership = await check_user_channels_membership(context.bot, user_id)
-    await sync_membership(context, user_info, membership['all_joined'])
-    if not membership['all_joined']:
-        channels_list_txt = format_channels_list_text(membership['channels'])
-        await update.message.reply_text(
-            config.MESSAGES['channels_prompt'].format(channels_list=channels_list_txt),
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_channels_join_keyboard(membership['channels'])
-        )
-        return
-
-    await update.message.reply_text(
-        "🎯 <b>Menu Principale Giveaway</b>\n\nScegli un'opzione:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=get_main_menu_keyboard(user_id)
-    )
+    if await get_ready_user(update, context):
+        await show_main_menu(update, context)
 
 async def deliver_rich_message(
     update: Update,
@@ -527,14 +559,12 @@ async def display_leaderboard(
         ]
     else:
         keyboard = [
+            [build_button("📤 Invita amici (+1 biglietto)", callback_data="user_invite", style=ButtonStyle.SUCCESS)],
             [
-                build_button("📊 Il Mio Stato", callback_data="user_stats", style=ButtonStyle.PRIMARY),
-                build_button("👥 I Miei Inviti", callback_data="user_referrals", style=ButtonStyle.PRIMARY),
-            ],
-            [
+                build_button("📊 Il mio stato", callback_data="user_stats", style=ButtonStyle.PRIMARY),
                 build_button("🔄 Aggiorna", callback_data="user_leaderboard", style=ButtonStyle.TRANSPARENT),
-                build_button("🔙 Menu Principale", callback_data="main_menu", style=ButtonStyle.TRANSPARENT),
-            ]
+            ],
+            back_to_menu_row(),
         ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -555,126 +585,141 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 # USER CALLBACK HANDLERS
 # ============================================================================
 
+async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    keyboard = InlineKeyboardMarkup([
+        [build_button("📤 Invita amici (+1 biglietto)", callback_data="user_invite", style=ButtonStyle.SUCCESS)],
+        [build_button("👥 Chi ho invitato", callback_data="user_referrals", style=ButtonStyle.PRIMARY)],
+        back_to_menu_row(),
+    ])
+    await deliver_rich_message(
+        update, context,
+        logic.format_user_stats_rich_html(user_id),
+        logic.get_user_stats_message(user_id),
+        keyboard,
+        already_answered=True,
+    )
+
+async def show_invite(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    bot_link = logic.get_referral_link(user_id) or ""
+    pts = logic.calculate_points(user_id)
+    keyboard = InlineKeyboardMarkup([
+        [build_button("📤 Manda ai tuoi amici", url=get_share_url(bot_link), style=ButtonStyle.SUCCESS)],
+        [build_copy_referral_button(bot_link)],
+        [build_button("👥 Chi ho invitato", callback_data="user_referrals", style=ButtonStyle.PRIMARY)],
+        back_to_menu_row(),
+    ])
+    await send_or_edit(
+        update,
+        config.MESSAGES['invite'].format(link=bot_link, referrals=pts['referral_count']),
+        keyboard,
+    )
+
+async def show_referrals(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    bot_link = logic.get_referral_link(user_id) or ""
+    keyboard = InlineKeyboardMarkup([
+        [build_button("📤 Manda ai tuoi amici", url=get_share_url(bot_link), style=ButtonStyle.SUCCESS)],
+        [build_copy_referral_button(bot_link)],
+        back_to_menu_row(),
+    ])
+    await deliver_rich_message(
+        update, context,
+        logic.format_user_referrals_rich_html(user_id),
+        logic.format_user_referrals_text_fallback(user_id),
+        keyboard,
+        already_answered=True,
+    )
+
+async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = InlineKeyboardMarkup([
+        [build_button(f"➕ {ch['name']}", url=ch["url"]) for ch in config.REQUIRED_CHANNELS],
+        back_to_menu_row(),
+    ])
+    await deliver_rich_message(
+        update, context,
+        logic.format_help_rich_html(),
+        config.MESSAGES['help'],
+        keyboard,
+        already_answered=True,
+    )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show_help(update, context)
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_info = await get_ready_user(update, context)
+    if user_info:
+        await show_stats(update, context, user_info['user_id'])
+
+async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_info = await get_ready_user(update, context)
+    if user_info:
+        await show_invite(update, context, user_info['user_id'])
+
+async def group_redirect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Nei gruppi: invita a scrivere al bot in privato invece di rispondere lì"""
+    bot_url = f"https://t.me/{config.BOT_USERNAME.replace('@', '')}?start"
+    keyboard = InlineKeyboardMarkup([[build_button("🤖 Apri il bot in privato", url=bot_url, style=ButtonStyle.SUCCESS)]])
+    await update.message.reply_text(config.MESSAGES['group_redirect'], parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+# ============================================================================
+# USER CALLBACK HANDLERS
+# ============================================================================
+
 async def user_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Gestisce tutte le azioni inline dell'utente"""
     query = update.callback_query
     user_id = query.from_user.id
     data = query.data
 
+    # L'aiuto e la classifica sono sempre disponibili, anche senza registrazione
+    if data == "user_help":
+        await query.answer()
+        await show_help(update, context)
+        return
+    if data == "user_leaderboard":
+        await query.answer()
+        await display_leaderboard(update, context, is_admin_view=False)
+        return
+
     user_info_db = db.get_user(user_id)
     if not user_info_db:
-        await query.answer("❌ Usa /start per registrarti.", show_alert=True)
+        await query.answer("👋 Prima scrivi /start per iscriverti al giveaway!", show_alert=True)
         return
 
     if data == "check_membership":
         membership = await check_user_channels_membership(context.bot, user_id)
         if membership['all_joined']:
             was_inactive = await sync_membership(context, user_info_db, True)
-
-            await query.answer("✅ Ottimo! Sei iscritto a tutti i 2 canali!", show_alert=True)
-            bot_link = logic.get_referral_link(user_id)
+            await query.answer("✅ Perfetto! Sei iscritto a tutti e 2 i canali!", show_alert=True)
             if was_inactive:
-                msg = config.MESSAGES['welcome_new'].format(link=bot_link)
+                text = config.MESSAGES['welcome_new'].format(link=logic.get_referral_link(user_id))
             else:
-                msg = config.MESSAGES['welcome_back'].format(
-                    link=bot_link,
-                    participation_status="✅ <b>Sei qualificato per l'estrazione a 7 vincitori!</b>"
-                )
-            await query.edit_message_text(
-                msg,
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_main_menu_keyboard(user_id, referral_link=bot_link),
-            )
+                text = welcome_back_text(user_id)
+            await send_or_edit(update, text, get_main_menu_keyboard())
+            await send_reply_keyboard(update)
         else:
-            await query.answer("❌ Mancano ancora dei canali! Iscriviti a tutti e 2 per partecipare.", show_alert=True)
-            channels_list_txt = format_channels_list_text(membership['channels'])
-            await query.edit_message_text(
-                config.MESSAGES['channels_prompt'].format(channels_list=channels_list_txt),
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_channels_join_keyboard(membership['channels'])
+            missing = ", ".join(ch["name"] for ch in membership['channels'] if not ch["is_member"])
+            await query.answer(
+                f"❌ Non sei ancora iscritto a: {missing}.\n\n"
+                "Tocca ➕ Entra, poi nel canale premi UNISCITI. "
+                "Se l'hai appena fatto, aspetta qualche secondo e riprova.",
+                show_alert=True
             )
-        return
-
-    membership = await check_user_channels_membership(context.bot, user_id)
-    await sync_membership(context, user_info_db, membership['all_joined'])
-    if not membership['all_joined']:
-        await query.answer()
-        channels_list_txt = format_channels_list_text(membership['channels'])
-        await query.edit_message_text(
-            config.MESSAGES['channels_prompt'].format(channels_list=channels_list_txt),
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_channels_join_keyboard(membership['channels'])
-        )
+            await send_channels_prompt(update, membership)
         return
 
     await query.answer()
+    if not await get_ready_user(update, context):
+        return
 
     if data == "main_menu":
-        await query.edit_message_text(
-            "🎯 <b>Menu Principale Giveaway</b>\n\nScegli un'opzione:",
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_main_menu_keyboard(user_id)
-        )
-
+        await show_main_menu(update, context)
     elif data == "user_stats":
-        rich_html = logic.format_user_stats_rich_html(user_id)
-        fallback = logic.get_user_stats_message(user_id)
-        bot_link = logic.get_referral_link(user_id) or ""
-        keyboard = [
-            [build_copy_referral_button(bot_link)],
-            [build_button("👥 I Miei Inviti", callback_data="user_referrals", style=ButtonStyle.PRIMARY)],
-            [build_button("🔙 Menu Principale", callback_data="main_menu", style=ButtonStyle.TRANSPARENT)]
-        ]
-        await deliver_rich_message(
-            update,
-            context,
-            rich_html,
-            fallback,
-            InlineKeyboardMarkup(keyboard),
-            already_answered=True,
-        )
-
+        await show_stats(update, context, user_id)
+    elif data == "user_invite":
+        await show_invite(update, context, user_id)
     elif data == "user_referrals":
-        bot_link = logic.get_referral_link(user_id) or ""
-        rich_html = logic.format_user_referrals_rich_html(user_id)
-        fallback = logic.format_user_referrals_text_fallback(user_id)
-        share_text = quote_plus("🎮 Unisciti al Giveaway Fortnite! In palio 7 premi fantastici:")
-        share_url = f"https://t.me/share/url?url={bot_link}&text={share_text}"
-        keyboard = [
-            [
-                build_copy_referral_button(bot_link),
-                build_button("🚀 Condividi", url=share_url, style=ButtonStyle.PRIMARY),
-            ],
-            [build_button("📊 Il Mio Stato", callback_data="user_stats", style=ButtonStyle.PRIMARY)],
-            [build_button("🔙 Menu Principale", callback_data="main_menu", style=ButtonStyle.TRANSPARENT)]
-        ]
-        await deliver_rich_message(
-            update,
-            context,
-            rich_html,
-            fallback,
-            InlineKeyboardMarkup(keyboard),
-            already_answered=True,
-        )
-
-    elif data == "user_leaderboard":
-        await display_leaderboard(update, context, is_admin_view=False)
-
-    elif data == "user_help":
-        rich_html = logic.format_help_rich_html()
-        fallback = config.MESSAGES['help']
-        keyboard = [
-            [build_button("📢 Canale Ufficiale Fortnite News", url=config.CHANNEL_USERNAME)],
-            [build_button("🔙 Menu Principale", callback_data="main_menu", style=ButtonStyle.TRANSPARENT)]
-        ]
-        await deliver_rich_message(
-            update,
-            context,
-            rich_html,
-            fallback,
-            InlineKeyboardMarkup(keyboard),
-            already_answered=True,
-        )
+        await show_referrals(update, context, user_id)
 
 # ============================================================================
 # BROADCAST FUNCTIONALITY
@@ -758,42 +803,86 @@ async def send_broadcast(context: ContextTypes.DEFAULT_TYPE, admin_id: int, mess
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
+# Parole che le persone scrivono a mano invece di toccare i pulsanti
+TEXT_SHORTCUTS = {
+    config.BTN_STATUS: "stats", "stato": "stats", "biglietti": "stats", "punti": "stats",
+    config.BTN_INVITE: "invite", "invita": "invite", "link": "invite", "invito": "invite", "referral": "invite",
+    config.BTN_RANKING: "ranking", "classifica": "ranking",
+    config.BTN_HELP: "help", "aiuto": "help", "help": "help", "info": "help", "come funziona": "help",
+    "menu": "menu", "start": "menu", "inizia": "menu",
+}
+
+async def handle_user_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Risponde a qualsiasi testo dell'utente: pulsanti fissi, parole chiave o messaggio d'aiuto"""
+    text = (update.message.text or "").strip()
+    action = TEXT_SHORTCUTS.get(text) or TEXT_SHORTCUTS.get(text.lower().strip(" /!?."))
+
+    if action == "help":
+        await show_help(update, context)
+        return
+    if action == "ranking":
+        await display_leaderboard(update, context, is_admin_view=False)
+        return
+
+    if not db.get_user(update.effective_user.id):
+        # Mai registrato: la cosa più utile è avviare direttamente la registrazione
+        await start_command(update, context)
+        return
+
+    if action is None:
+        await update.message.reply_text(
+            config.MESSAGES['unknown_text'],
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_reply_keyboard(),
+        )
+        return
+
+    user_info = await get_ready_user(update, context)
+    if not user_info:
+        return
+    if action == "stats":
+        await show_stats(update, context, user_info['user_id'])
+    elif action == "invite":
+        await show_invite(update, context, user_info['user_id'])
+    else:
+        await show_main_menu(update, context)
+
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gestisce messaggi di testo (attesa broadcast da admin)"""
+    """Gestisce messaggi di testo: attesa broadcast da admin, altrimenti pulsanti e parole chiave"""
     user_id = update.effective_user.id
     
-    if context.user_data.get('awaiting_broadcast_message'):
-        if not is_admin(user_id):
-            return
-        
-        broadcast_message = update.message.text
+    if not (context.user_data.get('awaiting_broadcast_message') and is_admin(user_id)):
+        await handle_user_text(update, context)
+        return
 
-        # Anteprima reale: invia il messaggio all'admin esattamente come lo vedranno gli utenti.
-        # Se l'HTML non è valido, Telegram lo rifiuta qui e non dopo, durante l'invio a tutti.
-        try:
-            await update.message.reply_text(broadcast_message, parse_mode=ParseMode.HTML)
-        except BadRequest as e:
-            await update.message.reply_text(
-                f"❌ <b>HTML non valido:</b> {html.escape(str(e))}\n\nCorreggi il messaggio e invialo di nuovo.",
-                parse_mode=ParseMode.HTML
-            )
-            return
+    broadcast_message = update.message.text
 
-        context.user_data['broadcast_message'] = broadcast_message
-        context.user_data.pop('awaiting_broadcast_message', None)
-        
-        user_count = len(db.get_all_participants())
-        
-        keyboard = [
-            [build_button("✅ Sì, invia a tutti", callback_data="broadcast_confirm", style=ButtonStyle.SUCCESS)],
-            [build_button("❌ Annulla", callback_data="admin_menu", style=ButtonStyle.DANGER)]
-        ]
-        
+    # Anteprima reale: invia il messaggio all'admin esattamente come lo vedranno gli utenti.
+    # Se l'HTML non è valido, Telegram lo rifiuta qui e non dopo, durante l'invio a tutti.
+    try:
+        await update.message.reply_text(broadcast_message, parse_mode=ParseMode.HTML)
+    except BadRequest as e:
         await update.message.reply_text(
-            config.MESSAGES['broadcast_confirm'].format(user_count=user_count),
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            f"❌ <b>HTML non valido:</b> {html.escape(str(e))}\n\nCorreggi il messaggio e invialo di nuovo.",
+            parse_mode=ParseMode.HTML
         )
+        return
+
+    context.user_data['broadcast_message'] = broadcast_message
+    context.user_data.pop('awaiting_broadcast_message', None)
+    
+    user_count = len(db.get_all_participants())
+    
+    keyboard = [
+        [build_button("✅ Sì, invia a tutti", callback_data="broadcast_confirm", style=ButtonStyle.SUCCESS)],
+        [build_button("❌ Annulla", callback_data="admin_menu", style=ButtonStyle.DANGER)]
+    ]
+    
+    await update.message.reply_text(
+        config.MESSAGES['broadcast_confirm'].format(user_count=user_count),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 # ============================================================================
 # ADMIN COMMANDS & CALLBACKS
@@ -994,20 +1083,43 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # MAIN
 # ============================================================================
 
+async def post_init(app: Application) -> None:
+    """Imposta il menu comandi (pulsante "Menu" accanto alla barra di scrittura)"""
+    await app.bot.set_my_commands(
+        [
+            BotCommand("start", "🎁 Partecipa / ricomincia"),
+            BotCommand("invita", "📤 Invita amici e prendi biglietti"),
+            BotCommand("stato", "📊 I miei biglietti"),
+            BotCommand("classifica", "🏆 Classifica"),
+            BotCommand("aiuto", "❓ Come funziona"),
+        ],
+        scope=BotCommandScopeAllPrivateChats(),
+    )
+
 def main():
     """Avvia il bot Telegram"""
-    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
+    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("menu", menu_command))
-    app.add_handler(CommandHandler("classifica", leaderboard_command))
-    app.add_handler(CommandHandler("leaderboard", leaderboard_command))
-    app.add_handler(CommandHandler("admin", admin_command))
+    private = filters.ChatType.PRIVATE
+    app.add_handler(CommandHandler("start", start_command, filters=private))
+    app.add_handler(CommandHandler("menu", menu_command, filters=private))
+    app.add_handler(CommandHandler(["classifica", "leaderboard"], leaderboard_command, filters=private))
+    app.add_handler(CommandHandler(["stato", "biglietti"], stats_command, filters=private))
+    app.add_handler(CommandHandler(["invita", "link"], invite_command, filters=private))
+    app.add_handler(CommandHandler(["aiuto", "help"], help_command, filters=private))
+    app.add_handler(CommandHandler("admin", admin_command, filters=private))
+    app.add_handler(CommandHandler(
+        ["start", "menu", "classifica", "leaderboard", "stato", "biglietti", "invita", "link", "aiuto", "help"],
+        group_redirect_command,
+        filters=filters.ChatType.GROUPS,
+    ))
 
     app.add_handler(CallbackQueryHandler(admin_callback_handler, pattern=r'^(admin_|start_giveaway|draw_winner|broadcast_)'))
     app.add_handler(CallbackQueryHandler(user_callback_handler))
     app.add_handler(ChatMemberHandler(track_chat_member, ChatMemberHandler.CHAT_MEMBER))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_text_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & private, handle_text_message))
+    # Comandi sconosciuti in privato (es. /ciao): rispondi con l'aiuto invece di ignorarli
+    app.add_handler(MessageHandler(filters.COMMAND & private, handle_user_text))
 
     app.add_error_handler(error_handler)
 
@@ -1015,4 +1127,4 @@ def main():
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    main()
+    main()

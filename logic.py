@@ -158,9 +158,9 @@ class GiveawayLogic:
         bot_link = f"https://t.me/{config.BOT_USERNAME.replace('@', '')}?start={user['referral_code']}"
         
         if pts['is_qualified']:
-            participation_status = "✅ <b>SEI QUALIFICATO PER L'ESTRAZIONE!</b>"
+            participation_status = "✅ <b>Stai partecipando all'estrazione!</b>"
         else:
-            participation_status = "❌ <b>PARTECIPAZIONE IN PAUSA (Unisciti a tutti e 2 i canali)</b>"
+            participation_status = "❌ <b>NON stai partecipando:</b> entra in tutti e 2 i canali"
             
         return config.MESSAGES['stats'].format(
             participation_status=participation_status,
@@ -185,31 +185,31 @@ class GiveawayLogic:
         bot_link = self.get_referral_link(user_id) or ""
 
         if pts['is_qualified']:
-            status_line = "✅ <b>SEI QUALIFICATO PER L'ESTRAZIONE!</b>"
+            status_line = "✅ <b>Stai partecipando all'estrazione!</b>"
         else:
-            status_line = "❌ <b>PARTECIPAZIONE IN PAUSA</b> — unisciti a tutti e 2 i canali"
+            status_line = "❌ <b>NON stai partecipando:</b> entra in tutti e 2 i canali"
 
         table = (
             "<table bordered striped compact>\n"
             "  <caption>🎟️ Biglietti e posizione</caption>\n"
             "  <tr><th align=\"left\">Voce</th><th align=\"center\">Valore</th></tr>\n"
-            f"  <tr><td>Biglietto iscrizione ai 2 canali</td><td align=\"center\"><b>{pts['base_tickets']}</b></td></tr>\n"
+            f"  <tr><td>Biglietto per i 2 canali</td><td align=\"center\"><b>{pts['base_tickets']}</b></td></tr>\n"
             f"  <tr><td>Amici invitati validi</td><td align=\"center\"><b>{pts['referral_count']}</b></td></tr>\n"
             f"  <tr><td>Biglietti da inviti</td><td align=\"center\"><b>+{pts['referral_tickets']}</b></td></tr>\n"
             f"  <tr><td><b>Biglietti totali nell'urna</b></td><td align=\"center\"><b>{pts['total_tickets']}</b></td></tr>\n"
             f"  <tr><td>Posizione in classifica</td><td align=\"center\"><b>#{rank}</b></td></tr>\n"
-            f"  <tr><td>Probabilità estrazione a sorte</td><td align=\"center\"><b>~{prob}%</b></td></tr>\n"
+            f"  <tr><td>Probabilità di vincita</td><td align=\"center\"><b>~{prob}%</b></td></tr>\n"
             "</table>"
         )
 
         return (
-            "<h2>📊 Il Tuo Stato nel Giveaway</h2>\n"
+            "<h2>📊 Il tuo stato</h2>\n"
             f"<p>{status_line}</p>\n"
             "<hr/>\n"
             "<h3>🔗 Il tuo link referral</h3>\n"
             f"<pre><code>{_escape_html(bot_link)}</code></pre>\n"
             f"{_rich_copy_link_row(bot_link)}\n"
-            "<p><i>Condividi questo link per scalare la classifica e aumentare le tue chance!</i></p>\n"
+            "<p><i>Tocca il link per copiarlo e mandalo ai tuoi amici: ogni amico = +1 biglietto!</i></p>\n"
             f"{table}\n"
             "<blockquote>👥 Se vieni estratto tra i 5 vincitori, <b>1 dei tuoi invitati</b> vincerà un premio con te!</blockquote>"
         )
@@ -234,10 +234,10 @@ class GiveawayLogic:
         if not referrals:
             return (
                 "<h2>👥 I Tuoi Inviti Referral</h2>\n"
-                "<p>❌ Non hai ancora invitato nessun amico!</p>\n"
+                "<p>Non hai ancora invitato nessun amico. Tocca <b>📤 Manda ai tuoi amici</b> qui sotto per iniziare!</p>\n"
                 "<hr/>\n"
                 f"{link_block}\n"
-                "<footer>Condividilo su Telegram, WhatsApp, Discord, TikTok, ecc.</footer>"
+                "<footer>Puoi incollare il link anche su WhatsApp, Instagram, TikTok...</footer>"
             )
 
         counts = {'active': 0, 'inactive': 0, 'invalid': 0}
@@ -285,36 +285,32 @@ class GiveawayLogic:
 
     @staticmethod
     def format_help_rich_html() -> str:
-        """Guida al giveaway in Rich Message HTML."""
+        """Guida al giveaway in Rich Message HTML (domande e risposte semplici)."""
         return (
-            "<h2>ℹ️ Come Funziona il Giveaway a 7 Vincitori</h2>\n"
-            "<p>Abbiamo rinnovato il format per renderlo <b>inclusivo, meritocratico e senza frizione</b>!</p>\n"
-            "<hr/>\n"
-            "<h3>🎯 Come partecipare</h3>\n"
-            "<ol>\n"
-            "  <li>Iscriviti a tutti e 2 i canali ufficiali:\n"
-            "    <ul>\n"
-            '      <li><a href="https://t.me/FortniteNews">@FortniteNews</a></li>\n'
-            '      <li><a href="https://t.me/FortniteBundles">@FortniteBundles</a></li>\n'
-            "    </ul>\n"
-            "  </li>\n"
-            "  <li>Ottieni subito <b>1 biglietto garantito</b> per l'estrazione!</li>\n"
-            "</ol>\n"
-            "<hr/>\n"
-            "<h3>🏆 I 7 vincitori in palio</h3>\n"
-            "<blockquote><b>🥇 1. Primo classificato (Top Referrer)</b><br/>"
-            "Chi invita più amici vince direttamente il 1° premio. Nessun limite agli inviti!</blockquote>\n"
-            "<blockquote><b>🎲 2–6. Cinque estratti a sorte</b><br/>"
-            "Estrazione ponderata sui biglietti: ogni amico invitato = <b>+1 biglietto</b> nell'urna.</blockquote>\n"
-            "<blockquote><b>👥 7. Un amico tra gli invitati dei 5 estratti</b><br/>"
-            "Tra gli amici invitati dai 5 vincitori sorteggiati viene estratto <b>1 vincitore bonus</b>. "
-            "Se vinci tu tra i 5, <b>fai vincere anche un tuo amico</b>!</blockquote>\n"
-            "<hr/>\n"
-            "<h3>🔗 Come invitare amici</h3>\n"
-            "<p>Copia il link personale da <b>📊 Il Mio Stato</b> e condividilo ovunque "
-            "(Telegram, WhatsApp, Instagram, TikTok, Discord, ecc.).</p>\n"
-            "<p><i>Valgono solo le nuove iscrizioni che completano l'accesso ai 2 canali.</i></p>\n"
-            "<footer>Buona fortuna a tutti! 🍀</footer>"
+            "<h2>❓ Aiuto – Come funziona</h2>\n"
+            "<h3>1. Come partecipo?</h3>\n"
+            "<p>Entra in questi 2 canali e premi <b>UNISCITI</b>:</p>\n"
+            "<ul>\n"
+            '  <li><a href="https://t.me/FortniteNews">@FortniteNews</a></li>\n'
+            '  <li><a href="https://t.me/FortniteBundles">@FortniteBundles</a></li>\n'
+            "</ul>\n"
+            "<p>Fatto! Hai già <b>1 biglietto</b> 🎟️</p>\n"
+            "<h3>2. Come aumento le possibilità di vincere?</h3>\n"
+            "<p>Tocca <b>📤 Invita amici</b> e manda il tuo link. "
+            "Ogni amico che entra nei 2 canali = <b>+1 biglietto</b>.</p>\n"
+            "<h3>3. Quante persone vincono?</h3>\n"
+            "<ul>\n"
+            "  <li>🥇 <b>1</b> – chi invita più amici</li>\n"
+            "  <li>🎲 <b>5</b> – estratti a sorte (più biglietti = più possibilità)</li>\n"
+            "  <li>👥 <b>1</b> – un amico invitato da uno dei 5 estratti</li>\n"
+            "</ul>\n"
+            "<h3>4. Il mio amico non conta, perché?</h3>\n"
+            "<p>Conta solo chi <b>non era già</b> nei canali prima del giveaway, e deve restare iscritto a tutti e 2.</p>\n"
+            "<h3>5. Cosa succede se esco da un canale?</h3>\n"
+            "<p>Non partecipi più finché non rientri. <b>Non uscire fino alla fine!</b> ⚠️</p>\n"
+            "<h3>6. Come so se ho vinto?</h3>\n"
+            "<p>I vincitori vengono contattati in privato qui su Telegram.</p>\n"
+            "<footer>Qualcosa non funziona? Scrivi /start per ricominciare.</footer>"
         )
 
     def format_user_referrals_text_fallback(self, user_id: int) -> str:
@@ -329,7 +325,8 @@ class GiveawayLogic:
         if not referrals:
             return f"""👥 <b>I Tuoi Inviti Referral</b>
 
-❌ Non hai ancora invitato nessun amico!
+Non hai ancora invitato nessun amico.
+👉 Tocca <b>📤 Manda ai tuoi amici</b> qui sotto per iniziare!
 
 ┏━━━━━━━━━━━━━━━━━━━━━
 🔗 <b>IL TUO LINK PERSONALE:</b>
@@ -340,7 +337,7 @@ class GiveawayLogic:
 Inoltre, se vinci tu tra i 5 estratti a sorte, <b>uno dei tuoi amici vince con te!</b>
 ┗━━━━━━━━━━━━━━━━━━━━━
 
-Condividilo su Telegram, WhatsApp, Discord, TikTok, ecc."""
+Puoi incollare il link anche su WhatsApp, Instagram, TikTok..."""
 
         message = f"""👥 <b>I Tuoi Inviti Referral</b>
 
@@ -794,4 +791,4 @@ Condividilo su Telegram, WhatsApp, Discord, TikTok, ecc."""
                 ]
             }
         blocks.append(buttons_block)
-        return blocks
+        return blocks
