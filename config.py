@@ -42,6 +42,10 @@ BTN_INVITE = "📤 Invita amici"
 BTN_RANKING = "🏆 Classifica"
 BTN_HELP = "❓ Aiuto"
 
+# Ogni quanti minuti ricontrollare l'iscrizione di tutti gli utenti, per recuperare
+# uscite/entrate che Telegram non ha notificato (es. bot spento o riavviato).
+MEMBERSHIP_RECHECK_MINUTES = 30
+
 # Animazioni: effetti a schermo intero di Telegram sui messaggi importanti (solo chat private).
 # Metti False per disattivarle. Se un effetto non è disponibile, il messaggio parte comunque senza.
 ANIMATIONS_ENABLED = True
@@ -295,6 +299,8 @@ Valgono solo gli amici <b>nuovi</b>, che entrano grazie al tuo link.
     "channels_missing_header": "❌ <b>Manca ancora: {missing}</b>\n<i>Se ti sei appena iscritto, aspetta qualche secondo e riprova.</i>\n",
 
     "checking_channels": "🔍 <b>Controllo le tue iscrizioni...</b>\n\n{lines}",
+
+    "check_unavailable": "⚠️ <b>Non riesco a controllare le iscrizioni in questo momento.</b>\n\nRiprova tra qualche secondo 🙏",
 
     "group_redirect": "👋 Per partecipare al giveaway devi scrivermi <b>in privato</b>.\n\nTocca il pulsante qui sotto 👇"
 }

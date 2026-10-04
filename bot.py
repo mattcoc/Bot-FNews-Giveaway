@@ -160,6 +160,7 @@ def get_admin_menu_keyboard() -> InlineKeyboardMarkup:
         [build_button("📊 Statistiche", callback_data="admin_stats", style=ButtonStyle.PRIMARY)],
         [build_button("🏆 Classifica Completa", callback_data="admin_leaderboard", style=ButtonStyle.PRIMARY)],
         [build_button("📢 Invia Broadcast", callback_data="admin_broadcast", style=ButtonStyle.TRANSPARENT)],
+        [build_button("🔍 Ricontrolla iscrizioni ora", callback_data="admin_recheck", style=ButtonStyle.TRANSPARENT)],
         [build_button("🎲 Estrai i 7 Vincitori", callback_data="admin_draw_winner", style=ButtonStyle.DANGER)],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -172,8 +173,11 @@ def is_member_status(member: ChatMember) -> bool:
         return bool(getattr(member, "is_member", False))
     return False
 
-async def check_single_channel_membership(bot, channel_info: dict, user_id: int) -> bool:
-    """Verifica l'iscrizione dell'utente a un singolo canale"""
+async def check_single_channel_membership(bot, channel_info: dict, user_id: int) -> Optional[bool]:
+    """
+    Verifica l'iscrizione dell'utente a un singolo canale.
+    Restituisce None se la verifica non è riuscita (errore di rete/API): in quel caso lo stato è sconosciuto.
+    """
     chat_target = channel_info.get("id") or channel_info.get("username")
     try:
         member = await bot.get_chat_member(chat_target, user_id)
@@ -183,27 +187,36 @@ async def check_single_channel_membership(bot, channel_info: dict, user_id: int)
         if "user not found" in err_msg or "participant_id_invalid" in err_msg:
             return False
         logger.warning(f"Error checking membership for user {user_id} in {chat_target}: {e}")
-        return False
+        return None
 
-async def check_user_channels_membership(bot, user_id: int) -> dict:
-    """Verifica l'iscrizione a tutti i canali obbligatori"""
+async def check_user_channels_membership(bot, user_id: int, known: Optional[dict] = None) -> dict:
+    """
+    Verifica l'iscrizione a tutti i canali obbligatori.
+    `known` = {nome_canale: bool} per i canali di cui si conosce già lo stato (es. dall'evento appena ricevuto),
+    che ha la precedenza su getChatMember (che subito dopo un'uscita può restituire ancora "membro").
+    """
     channels_status = []
-    all_joined = True
+    unknown = False
     
     for ch in config.REQUIRED_CHANNELS:
-        is_sub = await check_single_channel_membership(bot, ch, user_id)
-        if not is_sub:
-            all_joined = False
+        if known and ch["name"] in known:
+            is_sub = known[ch["name"]]
+        else:
+            is_sub = await check_single_channel_membership(bot, ch, user_id)
+        if is_sub is None:
+            unknown = True
         channels_status.append({
             "name": ch["name"],
             "username": ch["username"],
             "url": ch["url"],
-            "is_member": is_sub
+            "is_member": bool(is_sub)
         })
         
     return {
-        "all_joined": all_joined,
-        "channels": channels_status
+        "all_joined": all(c["is_member"] for c in channels_status),
+        "channels": channels_status,
+        # True se almeno un canale non è stato verificato: lo stato non va salvato
+        "unknown": unknown,
     }
 
 def get_channels_join_keyboard(channels_status: list) -> InlineKeyboardMarkup:
@@ -328,8 +341,16 @@ async def track_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_info:
         return
 
-    membership = await check_user_channels_membership(context.bot, user_id)
+    # Per il canale dell'evento vale lo stato dell'evento stesso: getChatMember subito dopo
+    # un'uscita può rispondere ancora "membro" e l'invito resterebbe valido senza notifiche
+    membership = await check_user_channels_membership(
+        context.bot, user_id, known={matched_channel['name']: is_in_channel}
+    )
     currently_member = membership['all_joined']
+    if membership['unknown'] and currently_member:
+        # Non è stato possibile verificare gli altri canali: meglio non segnare l'utente come iscritto
+        logger.warning(f"Stato iscrizione di {user_id} non verificabile, riprovo al prossimo controllo")
+        return
 
     if await sync_membership(context, user_info, currently_member):
         if not currently_member and is_leaving and db.is_giveaway_active():
@@ -374,21 +395,28 @@ async def check_membership_animated(update: Update, context: ContextTypes.DEFAUL
     """
     message = update.callback_query.message if update.callback_query else None
     channels_status = []
+    unknown = False
     lines = [f"⏳ {ch['name']}..." for ch in config.REQUIRED_CHANNELS]
     if message and config.ANIMATIONS_ENABLED:
         await safe_edit(message, config.MESSAGES['checking_channels'].format(lines="\n".join(lines)))
 
     for i, ch in enumerate(config.REQUIRED_CHANNELS):
-        is_sub = await check_single_channel_membership(context.bot, ch, user_id)
+        result = await check_single_channel_membership(context.bot, ch, user_id)
+        unknown = unknown or result is None
+        is_sub = bool(result)
         channels_status.append({"name": ch["name"], "username": ch["username"], "url": ch["url"], "is_member": is_sub})
-        lines[i] = f"{'✅' if is_sub else '❌'} {ch['name']}"
+        lines[i] = f"{'✅' if is_sub else ('⚠️' if result is None else '❌')} {ch['name']}"
         if message and config.ANIMATIONS_ENABLED:
             await asyncio.sleep(0.5)
             await safe_edit(message, config.MESSAGES['checking_channels'].format(lines="\n".join(lines)))
 
     if message and config.ANIMATIONS_ENABLED:
         await asyncio.sleep(0.5)
-    return {"all_joined": all(c["is_member"] for c in channels_status), "channels": channels_status}
+    return {"all_joined": all(c["is_member"] for c in channels_status), "channels": channels_status, "unknown": unknown}
+
+async def send_check_unavailable(update: Update) -> None:
+    keyboard = InlineKeyboardMarkup([[build_button("🔄 Riprova", callback_data="check_membership", style=ButtonStyle.SUCCESS)]])
+    await send_or_edit(update, config.MESSAGES['check_unavailable'], keyboard)
 
 async def send_reply_keyboard(update: Update) -> None:
     """Mostra i pulsanti fissi sotto la tastiera"""
@@ -418,6 +446,9 @@ async def get_ready_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return None
 
     membership = await check_user_channels_membership(context.bot, user_id)
+    if membership['unknown']:
+        await send_check_unavailable(update)
+        return None
     await sync_membership(context, user_info, membership['all_joined'])
     if not membership['all_joined']:
         await send_channels_prompt(update, membership)
@@ -437,6 +468,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     membership = await check_user_channels_membership(context.bot, user.id)
+    if membership['unknown']:
+        # Senza una verifica affidabile non registriamo né aggiorniamo nulla
+        await send_check_unavailable(update)
+        return
     is_fully_joined = membership['all_joined']
 
     existing_user = db.get_user(user.id)
@@ -768,7 +803,9 @@ async def user_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if data == "check_membership":
         await query.answer("🔍 Controllo in corso...")
         membership = await check_membership_animated(update, context, user_id)
-        if membership['all_joined']:
+        if membership['unknown']:
+            await send_check_unavailable(update)
+        elif membership['all_joined']:
             was_inactive = await sync_membership(context, user_info_db, True)
             await send_or_edit(update, "✅ <b>Perfetto! Sei iscritto a tutti e 2 i canali!</b>")
             await send_reply_keyboard(update)
@@ -978,7 +1015,9 @@ async def draw_verified_winners(context: ContextTypes.DEFAULT_TYPE, max_attempts
         not_members = []
         for uid in logic.get_winner_ids(result):
             membership = await check_user_channels_membership(context.bot, uid)
-            if not membership['all_joined']:
+            if membership['unknown']:
+                logger.warning(f"Iscrizione del vincitore {uid} non verificabile (errore API): resta tra i vincitori")
+            elif not membership['all_joined']:
                 not_members.append(uid)
         if not not_members:
             return result
@@ -989,6 +1028,38 @@ async def draw_verified_winners(context: ContextTypes.DEFAULT_TYPE, max_attempts
         logger.info(f"Estrazione ripetuta: vincitori non più iscritti {not_members}")
     logger.warning("Impossibile verificare tutti i vincitori dopo il numero massimo di tentativi")
     return result
+
+async def recheck_all_memberships(context) -> dict:
+    """
+    Ricontrolla l'iscrizione di tutti gli utenti registrati e aggiorna inviti e notifiche.
+    Recupera le uscite/entrate che Telegram non ha notificato al bot.
+    `context` può essere un CallbackContext o l'Application (serve solo `.bot`).
+    """
+    checked = changed = skipped = 0
+    for participant in db.get_all_participants():
+        uid = participant['user_id']
+        membership = await check_user_channels_membership(context.bot, uid)
+        if membership['unknown']:
+            # Errore di rete/API: non tocchiamo lo stato per non segnare per sbaglio uscite false
+            skipped += 1
+        else:
+            user_info = db.get_user(uid)
+            if user_info and await sync_membership(context, user_info, membership['all_joined']):
+                changed += 1
+            checked += 1
+        await asyncio.sleep(0.1)  # resta ben sotto i limiti di Telegram
+    logger.info(f"Ricontrollo iscrizioni: {checked} verificati, {changed} cambiati, {skipped} non verificabili")
+    return {"checked": checked, "changed": changed, "skipped": skipped}
+
+async def membership_watchdog(app: Application) -> None:
+    """Ricontrollo periodico delle iscrizioni (anche subito dopo l'avvio, per recuperare il periodo offline)"""
+    await asyncio.sleep(60)
+    while True:
+        try:
+            await recheck_all_memberships(app)
+        except Exception:
+            logger.exception("Errore durante il ricontrollo periodico delle iscrizioni")
+        await asyncio.sleep(config.MEMBERSHIP_RECHECK_MINUTES * 60)
 
 async def reveal_draw_animated(context: ContextTypes.DEFAULT_TYPE, message, result: dict) -> None:
     """Animazione dell'estrazione: dado, conto alla rovescia e vincitori svelati uno alla volta"""
@@ -1107,10 +1178,53 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             update=update
         )
 
+    elif data == "admin_recheck":
+        await query.edit_message_text("🔍 <b>Ricontrollo le iscrizioni di tutti gli utenti...</b>\n<i>Può richiedere qualche minuto, il bot intanto continua a rispondere.</i>", parse_mode=ParseMode.HTML)
+
+        async def run_recheck(message):
+            res = await recheck_all_memberships(context)
+            keyboard = [[build_button("⬅️ Torna al Menu", callback_data="admin_menu", style=ButtonStyle.TRANSPARENT)]]
+            await safe_edit(
+                message,
+                "✅ <b>Ricontrollo completato</b>\n\n"
+                f"👥 Verificati: <b>{res['checked']}</b>\n"
+                f"🔄 Stato cambiato (e referrer avvisati): <b>{res['changed']}</b>\n"
+                f"⚠️ Non verificabili: <b>{res['skipped']}</b>",
+                InlineKeyboardMarkup(keyboard),
+            )
+
+        # In background: con molti utenti richiede minuti e non deve bloccare il bot
+        context.application.create_task(run_recheck(query.message), update=update)
+
+    elif data == "admin_draw_reset":
+        keyboard = [
+            [build_button("♻️ Sì, annulla l'estrazione", callback_data="admin_draw_reset_confirm", style=ButtonStyle.DANGER)],
+            [build_button("⬅️ Torna Indietro", callback_data="admin_menu", style=ButtonStyle.TRANSPARENT)]
+        ]
+        await query.edit_message_text(
+            "⚠️ <b>Annullare l'estrazione salvata?</b>\n\n"
+            "Il giveaway viene riaperto (iscrizioni e notifiche ripartono). "
+            "Usalo solo se era un'estrazione di prova.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
+
+    elif data == "admin_draw_reset_confirm":
+        db.reset_draw()
+        keyboard = [[build_button("⬅️ Torna al Menu", callback_data="admin_menu", style=ButtonStyle.TRANSPARENT)]]
+        await query.edit_message_text(
+            "♻️ <b>Estrazione annullata, giveaway riaperto.</b>",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.HTML
+        )
+
     elif data == "admin_draw_winner":
         saved = db.get_draw_result()
         if saved:
-            keyboard = [[build_button("⬅️ Torna al Menu", callback_data="admin_menu", style=ButtonStyle.TRANSPARENT)]]
+            keyboard = [
+                [build_button("♻️ Annulla estrazione (era una prova)", callback_data="admin_draw_reset", style=ButtonStyle.DANGER)],
+                [build_button("⬅️ Torna al Menu", callback_data="admin_menu", style=ButtonStyle.TRANSPARENT)],
+            ]
             await query.edit_message_text(
                 "ℹ️ <b>Estrazione già effettuata.</b> Risultato salvato:\n\n" + logic.format_draw_results(saved),
                 reply_markup=InlineKeyboardMarkup(keyboard),
@@ -1193,6 +1307,8 @@ async def post_init(app: Application) -> None:
         ],
         scope=BotCommandScopeAllPrivateChats(),
     )
+    # Ricontrollo periodico delle iscrizioni (riferimento salvato per non farlo raccogliere dal GC)
+    app.bot_data['membership_watchdog'] = asyncio.get_running_loop().create_task(membership_watchdog(app))
 
 def main():
     """Avvia il bot Telegram"""

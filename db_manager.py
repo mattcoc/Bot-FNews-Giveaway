@@ -364,5 +364,14 @@ class DatabaseManager:
         conn.close()
         return json.loads(row['result_json']) if row else None
 
+    def reset_draw(self):
+        """Annulla l'estrazione salvata e riapre il giveaway (es. dopo un'estrazione di prova)."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM draw_results WHERE id = 1")
+        cursor.execute("UPDATE giveaway_status SET is_active = 1 WHERE id = 1 AND started_at IS NOT NULL")
+        conn.commit()
+        conn.close()
+
     def is_giveaway_ended(self) -> bool:
         return self.get_draw_result() is not None
