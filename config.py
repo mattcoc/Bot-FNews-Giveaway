@@ -266,4 +266,4 @@ Buona fortuna a tutti! 🍀
     "giveaway_not_started": "⚠️ Il giveaway non è ancora iniziato. Riprova più tardi!",
 
     "giveaway_ended": "🏁 Il giveaway è concluso e l'estrazione dei vincitori è già stata effettuata. Grazie a tutti per aver partecipato!"
-}
+}

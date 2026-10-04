@@ -794,4 +794,4 @@ Condividilo su Telegram, WhatsApp, Discord, TikTok, ecc."""
                 ]
             }
         blocks.append(buttons_block)
-        return blocks
+        return blocks
