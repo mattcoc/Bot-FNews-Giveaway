@@ -10,6 +10,9 @@ from db_manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
+# Generatore crittograficamente sicuro per le estrazioni
+_rng = random.SystemRandom()
+
 
 def _escape_html(text: str) -> str:
     """Escapa caratteri speciali per HTML Telegram."""
@@ -19,6 +22,18 @@ def _escape_html(text: str) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
+
+
+def display_name(username: Optional[str], first_name: Optional[str], fallback: str) -> str:
+    """Nome visualizzabile (non escapato): @username, nome o fallback."""
+    if username:
+        return f"@{username}"
+    return first_name or fallback
+
+
+def safe_name(username: Optional[str], first_name: Optional[str], fallback: str) -> str:
+    """Nome visualizzabile già escapato per i messaggi HTML."""
+    return _escape_html(display_name(username, first_name, fallback))
 
 
 def _escape_html_attr(text: str) -> str:
@@ -81,19 +96,49 @@ class GiveawayLogic:
             'total_points': total_points,
         }
     
+    def get_all_points(self) -> List[dict]:
+        """Biglietti e inviti di tutti gli utenti con una sola query (stesse regole di calculate_points)."""
+        result = []
+        for p in self.db.get_participants_with_referrals():
+            is_qualified = p['is_channel_member'] == 1
+            referral_count = p['active_refs']
+            base_tickets = config.BASE_TICKETS if is_qualified else 0
+            referral_tickets = (referral_count * config.TICKETS_PER_REFERRAL) if is_qualified else 0
+            result.append({
+                'user_id': p['user_id'],
+                'username': p['username'],
+                'first_name': p['first_name'],
+                'joined_at': p['joined_at'],
+                'is_qualified': is_qualified,
+                'referral_count': referral_count,
+                'total_tickets': base_tickets + referral_tickets,
+                'total_points': referral_count * config.POINTS_PER_REFERRAL,
+            })
+        return result
+
+    @staticmethod
+    def _ranking_key(p: dict):
+        """Ordinamento classifica: prima i qualificati, poi per inviti, poi per data di iscrizione."""
+        return (not p['is_qualified'], -p['referral_count'], p['joined_at'] or "")
+
+    def get_user_rank(self, user_id: int) -> int:
+        """Posizione dell'utente, coerente con la classifica mostrata."""
+        ranking = sorted(self.get_all_points(), key=self._ranking_key)
+        for idx, p in enumerate(ranking, start=1):
+            if p['user_id'] == user_id:
+                return idx
+        return len(ranking) + 1
+
     def calculate_win_probability(self, user_id: int) -> float:
         """Calcola la percentuale di probabilità nell'estrazione a sorte in base ai biglietti posseduti"""
-        participants = self.db.get_all_participants()
-        
         total_tickets_all = 0
         user_tickets = 0
         
-        for p in participants:
-            if p.get('is_channel_member', 0) == 1:
-                pts = self.calculate_points(p['user_id'])
-                total_tickets_all += pts['total_tickets']
+        for p in self.get_all_points():
+            if p['is_qualified']:
+                total_tickets_all += p['total_tickets']
                 if p['user_id'] == user_id:
-                    user_tickets = pts['total_tickets']
+                    user_tickets = p['total_tickets']
         
         if total_tickets_all == 0 or user_tickets == 0:
             return 0.0
@@ -108,7 +153,7 @@ class GiveawayLogic:
             return "❌ Utente non trovato. Usa /start per registrarti."
         
         pts = self.calculate_points(user_id)
-        rank = self.db.get_user_rank(user_id)
+        rank = self.get_user_rank(user_id)
         prob = self.calculate_win_probability(user_id)
         bot_link = f"https://t.me/{config.BOT_USERNAME.replace('@', '')}?start={user['referral_code']}"
         
@@ -135,7 +180,7 @@ class GiveawayLogic:
             return "<p>❌ Utente non trovato. Usa /start per registrarti.</p>"
 
         pts = self.calculate_points(user_id)
-        rank = self.db.get_user_rank(user_id)
+        rank = self.get_user_rank(user_id)
         prob = self.calculate_win_probability(user_id)
         bot_link = self.get_referral_link(user_id) or ""
 
@@ -198,8 +243,7 @@ class GiveawayLogic:
         counts = {'active': 0, 'inactive': 0, 'invalid': 0}
         rows = ""
         for ref in referrals:
-            username = f"@{ref['username']}" if ref['username'] else ref['first_name']
-            username = _escape_html(username)
+            username = safe_name(ref['username'], ref['first_name'], f"Utente {ref['referred_id']}")
             if ref['is_valid_new_member'] == 0:
                 status = "⚠️ Non valido (già iscritto)"
                 counts['invalid'] += 1
@@ -309,7 +353,7 @@ Condividilo su Telegram, WhatsApp, Discord, TikTok, ecc."""
 <b>📋 Lista degli amici invitati:</b>\n\n"""
         counts = {'active': 0, 'inactive': 0, 'invalid': 0}
         for ref in referrals:
-            username = f"@{ref['username']}" if ref['username'] else ref['first_name']
+            username = safe_name(ref['username'], ref['first_name'], f"Utente {ref['referred_id']}")
             if ref['is_valid_new_member'] == 0:
                 status = "⚠️ Non valido (già iscritto ai canali)"
                 counts['invalid'] += 1
@@ -331,47 +375,30 @@ Condividilo su Telegram, WhatsApp, Discord, TikTok, ecc."""
     def draw_7_winners(self) -> Optional[dict]:
         """
         Estrae i 7 Vincitori secondo il regolamento:
-        1. 🥇 Primo Classificato (Top Referrer)
+        1. 🥇 Primo Classificato (Top Referrer, almeno 1 invito valido)
         2. 🎲 5 Estratti a Sorte (estrazione ponderata sui biglietti)
         3. 👥 1 Amico tra gli invitati referral dei 5 estratti a sorte
         """
-        participants = self.db.get_all_participants()
-        
-        qualified = []
-        for p in participants:
-            if p.get('is_channel_member', 0) == 1:
-                pts = self.calculate_points(p['user_id'])
-                qualified.append({
-                    'user_id': p['user_id'],
-                    'username': p.get('username'),
-                    'first_name': p.get('first_name'),
-                    'joined_at': p.get('joined_at'),
-                    'referral_count': pts['referral_count'],
-                    'total_tickets': pts['total_tickets'],
-                    'total_points': pts['total_points']
-                })
+        qualified = [p for p in self.get_all_points() if p['is_qualified']]
         
         if not qualified:
             return None
         
         total_tickets = sum(p['total_tickets'] for p in qualified)
         
-        # 1. PRIMO CLASSIFICATO (Top Referrer)
-        qualified_sorted = sorted(qualified, key=lambda x: (-x['referral_count'], x['joined_at']))
-        first_place = qualified_sorted[0]
+        # 1. PRIMO CLASSIFICATO (Top Referrer): serve almeno un invito valido
+        qualified_sorted = sorted(qualified, key=self._ranking_key)
+        first_place = qualified_sorted[0] if qualified_sorted[0]['referral_count'] > 0 else None
         
-        draw_pool = [p for p in qualified if p['user_id'] != first_place['user_id']]
+        excluded_ids = {first_place['user_id']} if first_place else set()
+        draw_pool = [p for p in qualified if p['user_id'] not in excluded_ids]
         
         # 2. 5 ESTRATTI A SORTE (Ponderati)
         drawn_winners = []
-        num_to_draw = min(config.DRAWN_WINNERS_COUNT, len(draw_pool))
-        
         remaining_pool = list(draw_pool)
-        for _ in range(num_to_draw):
-            if not remaining_pool:
-                break
-            weighted_list = [p for p in remaining_pool for _ in range(max(1, p['total_tickets']))]
-            winner = random.choice(weighted_list)
+        for _ in range(min(config.DRAWN_WINNERS_COUNT, len(draw_pool))):
+            weights = [max(1, p['total_tickets']) for p in remaining_pool]
+            winner = _rng.choices(remaining_pool, weights=weights, k=1)[0]
             drawn_winners.append(winner)
             remaining_pool = [p for p in remaining_pool if p['user_id'] != winner['user_id']]
         
@@ -379,12 +406,12 @@ Condividilo su Telegram, WhatsApp, Discord, TikTok, ecc."""
         drawn_user_ids = [w['user_id'] for w in drawn_winners]
         friends_candidates = self.db.get_active_referrals_of_users(drawn_user_ids)
         
-        existing_winner_ids = {first_place['user_id']} | {w['user_id'] for w in drawn_winners}
+        existing_winner_ids = excluded_ids | {w['user_id'] for w in drawn_winners}
         eligible_friends = [f for f in friends_candidates if f['referred_id'] not in existing_winner_ids]
         
         referral_winner = None
         if eligible_friends:
-            chosen_friend = random.choice(eligible_friends)
+            chosen_friend = _rng.choice(eligible_friends)
             referral_winner = {
                 'user_id': chosen_friend['referred_id'],
                 'username': chosen_friend.get('username'),
@@ -397,7 +424,7 @@ Condividilo su Telegram, WhatsApp, Discord, TikTok, ecc."""
         else:
             fallback_candidates = [p for p in remaining_pool if p['user_id'] not in existing_winner_ids]
             if fallback_candidates:
-                chosen_fallback = random.choice(fallback_candidates)
+                chosen_fallback = _rng.choice(fallback_candidates)
                 referral_winner = {
                     'user_id': chosen_fallback['user_id'],
                     'username': chosen_fallback.get('username'),
@@ -415,6 +442,17 @@ Condividilo su Telegram, WhatsApp, Discord, TikTok, ecc."""
             'total_qualified': len(qualified),
             'total_tickets': total_tickets
         }
+
+    @staticmethod
+    def get_winner_ids(result: dict) -> List[int]:
+        """Tutti gli user_id vincitori di un'estrazione."""
+        ids = []
+        if result.get('first_place'):
+            ids.append(result['first_place']['user_id'])
+        ids.extend(w['user_id'] for w in result.get('drawn_winners', []))
+        if result.get('referral_winner'):
+            ids.append(result['referral_winner']['user_id'])
+        return ids
     
     def format_draw_results(self, result: dict) -> str:
         """Formatta i risultati dell'estrazione dei 7 vincitori per l'annuncio"""
@@ -425,32 +463,34 @@ Condividilo su Telegram, WhatsApp, Discord, TikTok, ecc."""
         drawn = result['drawn_winners']
         ref_w = result['referral_winner']
         
-        fp_name = f"@{fp['username']}" if fp.get('username') else (fp.get('first_name') or f"ID: {fp['user_id']}")
-        
         msg = "🎉 <b>ESTRAZIONE DEI 7 VINCITORI COMPLETATA!</b> 🎉\n\n"
         msg += f"📊 <b>Partecipanti qualificati:</b> {result['total_qualified']}\n"
         msg += f"🎟️ <b>Biglietti totali nell'urna:</b> {result['total_tickets']}\n\n"
         
         msg += "┏━━━━━━━━━━━━━━━━━━━━━\n"
         msg += "🥇 <b>1° CLASSIFICATO (TOP REFERRER)</b>\n"
-        msg += f"🏆 <b>{fp_name}</b> (<code>{fp['user_id']}</code>)\n"
-        msg += f"👥 Inviti validi portati: <b>{fp['referral_count']}</b>\n"
+        if fp:
+            fp_name = safe_name(fp.get('username'), fp.get('first_name'), f"ID: {fp['user_id']}")
+            msg += f"🏆 <b>{fp_name}</b> (<code>{fp['user_id']}</code>)\n"
+            msg += f"👥 Inviti validi portati: <b>{fp['referral_count']}</b>\n"
+        else:
+            msg += "<i>Nessun partecipante con inviti validi: premio non assegnato.</i>\n"
         msg += "┗━━━━━━━━━━━━━━━━━━━━━\n\n"
         
         msg += "┏━━━━━━━━━━━━━━━━━━━━━\n"
         msg += "🎲 <b>I 5 ESTRATTI A SORTE:</b>\n"
         medals = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
         for i, w in enumerate(drawn):
-            w_name = f"@{w['username']}" if w.get('username') else (w.get('first_name') or f"ID: {w['user_id']}")
+            w_name = safe_name(w.get('username'), w.get('first_name'), f"ID: {w['user_id']}")
             msg += f"{medals[i]} <b>{w_name}</b> (<code>{w['user_id']}</code>) • 🎟️ {w['total_tickets']} biglietti\n"
         msg += "┗━━━━━━━━━━━━━━━━━━━━━\n\n"
         
         msg += "┏━━━━━━━━━━━━━━━━━━━━━\n"
         msg += "👥 <b>1 AMICO TRA GLI INVITATI DEI 5 ESTRATTI</b>\n"
         if ref_w:
-            ref_name = f"@{ref_w['username']}" if ref_w.get('username') else (ref_w.get('first_name') or f"ID: {ref_w['user_id']}")
+            ref_name = safe_name(ref_w.get('username'), ref_w.get('first_name'), f"ID: {ref_w['user_id']}")
             if not ref_w.get('is_fallback'):
-                inv_name = f"@{ref_w['invited_by_username']}" if ref_w.get('invited_by_username') else (ref_w.get('invited_by_name') or f"ID: {ref_w['invited_by_id']}")
+                inv_name = safe_name(ref_w.get('invited_by_username'), ref_w.get('invited_by_name'), f"ID: {ref_w['invited_by_id']}")
                 msg += f"🎁 <b>{ref_name}</b> (<code>{ref_w['user_id']}</code>)\n"
                 msg += f"🔗 <i>Invitato dal vincitore estratto:</i> <b>{inv_name}</b>! 🥳\n"
             else:
@@ -463,25 +503,17 @@ Condividilo su Telegram, WhatsApp, Discord, TikTok, ecc."""
         return msg
     
     def get_leaderboard(self, limit: int = 10) -> List[dict]:
-        """Ottiene la classifica ordinata per numero di inviti / punti"""
-        participants = self.db.get_all_participants()
-        leaderboard = []
-        
-        for p in participants:
-            pts = self.calculate_points(p['user_id'])
-            leaderboard.append({
-                'user_id': p['user_id'],
-                'username': p.get('username'),
-                'first_name': p.get('first_name'),
-                'joined_at': p.get('joined_at'),
-                'referrals': pts['referral_count'],
-                'total_tickets': pts['total_tickets'],
-                'total_points': pts['total_points'],
-                'is_qualified': pts['is_qualified']
-            })
-        
-        leaderboard.sort(key=lambda x: (-x['referrals'], x['joined_at']))
+        """Ottiene la classifica: prima i qualificati, ordinati per numero di inviti"""
+        leaderboard = [
+            {**p, 'referrals': p['referral_count']}
+            for p in sorted(self.get_all_points(), key=self._ranking_key)
+        ]
         return leaderboard[:limit]
+
+    @staticmethod
+    def _is_first_place(position: int, p: dict) -> bool:
+        """Il primo posto vale solo se qualificato e con almeno un invito valido (come nell'estrazione)."""
+        return position == 1 and bool(p.get('is_qualified')) and p.get('referrals', 0) > 0
     
     def format_leaderboard(self, leaderboard: List[dict]) -> str:
         """Formatta la classifica per la visualizzazione all'utente"""
@@ -495,9 +527,9 @@ Condividilo su Telegram, WhatsApp, Discord, TikTok, ecc."""
         
         for i, p in enumerate(leaderboard, 1):
             medal = medals[i-1] if i <= 3 else f"<b>{i}.</b>"
-            name = f"@{p['username']}" if p.get('username') else (p.get('first_name') or f"Utente {p['user_id']}")
+            name = safe_name(p.get('username'), p.get('first_name'), f"Utente {p['user_id']}")
             
-            badge = " 👑 <b>(1° Posto)</b>" if i == 1 else ""
+            badge = " 👑 <b>(1° Posto)</b>" if self._is_first_place(i, p) else ""
             status_icon = "✅" if p['is_qualified'] else "⚠️"
             
             message += f"{medal} <b>{name}</b>{badge}\n"
@@ -572,14 +604,14 @@ Condividilo su Telegram, WhatsApp, Discord, TikTok, ecc."""
             else:
                 pos_str = str(i)
 
-            raw_name = f"@{p['username']}" if p.get('username') else (p.get('first_name') or f"Utente {p['user_id']}")
+            raw_name = safe_name(p.get('username'), p.get('first_name'), f"Utente {p['user_id']}")
 
             name_parts = []
             is_current = (user_id is not None and p['user_id'] == user_id)
             if is_current:
                 name_parts.append("⭐️")
             name_parts.append(raw_name)
-            if i == 1:
+            if self._is_first_place(i, p):
                 name_parts.append("👑")
             if is_current:
                 name_parts.append("(Tu)")
@@ -658,11 +690,12 @@ Condividilo su Telegram, WhatsApp, Discord, TikTok, ecc."""
         for i, p in enumerate(leaderboard, 1):
             pos_str = f" {i:<2} " if i < 10 else f"{i:<3} "
 
-            raw_name = f"@{p['username']}" if p.get('username') else (p.get('first_name') or f"{p['user_id']}")
+            raw_name = display_name(p.get('username'), p.get('first_name'), f"{p['user_id']}")
             is_current = (user_id is not None and p['user_id'] == user_id)
             if is_current:
                 raw_name = f"*{raw_name}"
-            name_cell = f" {raw_name[:12]:<12} "
+            # Tronca sul testo grezzo (per l'allineamento) e poi escapa per l'HTML
+            name_cell = " " + _escape_html(f"{raw_name[:12]:<12}") + " "
 
             inv_cell = f" {p.get('referrals', 0):>3} "
             tkt_cell = f" {p.get('total_tickets', 0):>3} "

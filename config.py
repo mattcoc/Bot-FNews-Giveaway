@@ -200,11 +200,7 @@ Scrivi il messaggio che vuoi inviare a <b>tutti gli utenti</b> registrati nel bo
 
 Il messaggio verrà inviato a <b>{user_count} utenti</b>.
 
-┏━━━━━━━━━━━━━━━━━━━━━
-<b>📝 ANTEPRIMA MESSAGGIO:</b>
-
-{message_preview}
-┗━━━━━━━━━━━━━━━━━━━━━
+👆 L'anteprima qui sopra è esattamente il messaggio che riceveranno.
 
 ⚠️ <b>Sei sicuro di voler procedere?</b>
 """,
@@ -267,5 +263,7 @@ Valgono solo i nuovi iscritti che completano l'accesso ai 2 canali.
 Buona fortuna a tutti! 🍀
 """,
 
-    "giveaway_not_started": "⚠️ Il giveaway non è ancora iniziato. Riprova più tardi!"
+    "giveaway_not_started": "⚠️ Il giveaway non è ancora iniziato. Riprova più tardi!",
+
+    "giveaway_ended": "🏁 Il giveaway è concluso e l'estrazione dei vincitori è già stata effettuata. Grazie a tutti per aver partecipato!"
 }

@@ -3,28 +3,27 @@ Bot Telegram principale per il Giveaway Fortnite
 Nuovo format inclusivo a 7 Vincitori, Multi-Canale e Zero Frizione
 """
 
+import html
 import logging
 import time
 import asyncio
 from typing import Optional
 from urllib.parse import quote_plus
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, CopyTextButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CopyTextButton, ChatMember
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, 
     CallbackQueryHandler, ContextTypes, filters, ChatMemberHandler
 )
-from telegram.error import TelegramError
+from telegram.error import TelegramError, BadRequest, RetryAfter
 from telegram.constants import ParseMode
 
 import config
 from config import ButtonStyle
 from db_manager import DatabaseManager
-from logic import GiveawayLogic
+from logic import GiveawayLogic, safe_name
 
 import warnings
 from telegram.warnings import PTBUserWarning
-from telegram.error import TelegramError, BadRequest
-from telegram.constants import ParseMode
 
 # Silenzia il warning di python-telegram-bot per l'uso di do_api_request con parametri Bot API 10.1+ (Rich Messages)
 warnings.filterwarnings("ignore", category=PTBUserWarning)
@@ -68,9 +67,7 @@ def build_button(
             api_kwargs = kwargs.get("api_kwargs", {}).copy() if "api_kwargs" in kwargs else {}
             api_kwargs["style"] = style
             params["api_kwargs"] = api_kwargs
-            btn = InlineKeyboardButton(**params)
-            setattr(btn, "style", style)
-            return btn
+            return InlineKeyboardButton(**params)
 
     return InlineKeyboardButton(**params)
 
@@ -87,11 +84,6 @@ def build_copy_referral_button(bot_link: str) -> InlineKeyboardButton:
 def is_admin(user_id: int) -> bool:
     """Verifica se l'utente è un amministratore configurato"""
     return user_id in config.ADMIN_IDS
-
-def get_user_mention(user: User) -> str:
-    """Restituisce una menzione formattata in HTML"""
-    name = user.first_name or user.username or f"User {user.id}"
-    return f'<a href="tg://user?id={user.id}">{name}</a>'
 
 def get_main_menu_keyboard(
     user_id: int,
@@ -122,12 +114,20 @@ def get_admin_menu_keyboard() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(keyboard)
 
+def is_member_status(member: ChatMember) -> bool:
+    """True se lo stato indica un membro effettivo del canale (gestisce anche 'restricted')."""
+    if member.status in (ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER):
+        return True
+    if member.status == ChatMember.RESTRICTED:
+        return bool(getattr(member, "is_member", False))
+    return False
+
 async def check_single_channel_membership(bot, channel_info: dict, user_id: int) -> bool:
     """Verifica l'iscrizione dell'utente a un singolo canale"""
     chat_target = channel_info.get("id") or channel_info.get("username")
     try:
         member = await bot.get_chat_member(chat_target, user_id)
-        return member.status in ['member', 'administrator', 'creator', 'restricted']
+        return is_member_status(member)
     except TelegramError as e:
         err_msg = str(e).lower()
         if "user not found" in err_msg or "participant_id_invalid" in err_msg:
@@ -174,6 +174,58 @@ def format_channels_list_text(channels_status: list) -> str:
         lines.append(f"{icon} <b>{ch['name']}</b> ({ch['username']}) - <i>{status_label}</i>")
     return "\n".join(lines)
 
+def is_pre_existing_member(user_id: int, channels_status: list) -> bool:
+    """
+    Un utente è considerato già iscritto prima del giveaway se:
+    - il log registra sue entrate/uscite precedenti all'avvio, oppure
+    - è attualmente in un canale per cui non risulta un'entrata DOPO l'avvio
+      (cioè ci era già prima che il bot iniziasse a tracciare).
+    """
+    if db.was_member_before_giveaway(user_id):
+        return True
+    return any(
+        ch["is_member"] and not db.joined_channel_after_start(user_id, ch["name"])
+        for ch in channels_status
+    )
+
+async def notify_referrers(context: ContextTypes.DEFAULT_TYPE, user_info: dict, now_member: bool):
+    """Avvisa i referrer (con invito valido) che l'invito è stato attivato, riattivato o sospeso."""
+    user_id = user_info['user_id']
+    username = safe_name(user_info.get('username'), user_info.get('first_name'), f"Utente {user_id}")
+    keyboard = InlineKeyboardMarkup([[build_button("📊 Vedi il Mio Stato", callback_data="user_stats", style=ButtonStyle.PRIMARY)]])
+
+    for referrer_id in db.get_valid_referrers_of_user(user_id):
+        ref_pts = logic.calculate_points(referrer_id)
+        if now_member:
+            if db.mark_referral_activated(referrer_id, user_id):
+                msg = config.MESSAGES['referral_activated'].format(
+                    username=username,
+                    total_tickets=ref_pts['total_tickets'],
+                    referrals=ref_pts['referral_count']
+                )
+            else:
+                msg = config.MESSAGES['referral_reactivated'].format(
+                    username=username,
+                    referrals=ref_pts['referral_count']
+                )
+        else:
+            msg = config.MESSAGES['referral_left'].format(
+                username=username,
+                referrals=ref_pts['referral_count']
+            )
+        try:
+            await context.bot.send_message(chat_id=referrer_id, text=msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        except TelegramError:
+            pass
+
+async def sync_membership(context: ContextTypes.DEFAULT_TYPE, user_info: dict, now_member: bool) -> bool:
+    """Aggiorna lo stato di iscrizione nel DB e avvisa i referrer se è cambiato. Restituisce True se è cambiato."""
+    if bool(user_info['is_channel_member']) == now_member:
+        return False
+    db.update_membership_status(user_info['user_id'], now_member)
+    await notify_referrers(context, user_info, now_member)
+    return True
+
 # ============================================================================
 # MEMBERSHIP TRACKING (MULTI-CANALE)
 # ============================================================================
@@ -197,11 +249,11 @@ async def track_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = update.chat_member.new_chat_member.user.id
-    old_status = update.chat_member.old_chat_member.status
-    new_status = update.chat_member.new_chat_member.status
+    was_in_channel = is_member_status(update.chat_member.old_chat_member)
+    is_in_channel = is_member_status(update.chat_member.new_chat_member)
 
-    is_joining = new_status in ['member', 'administrator', 'creator'] and old_status in ['left', 'kicked']
-    is_leaving = new_status in ['left', 'kicked'] and old_status in ['member', 'administrator', 'creator']
+    is_joining = is_in_channel and not was_in_channel
+    is_leaving = was_in_channel and not is_in_channel
 
     if is_joining:
         db.log_membership_action(user_id, f"joined:{matched_channel['name']}")
@@ -216,38 +268,9 @@ async def track_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     membership = await check_user_channels_membership(context.bot, user_id)
-    previously_member = bool(user_info['is_channel_member'])
     currently_member = membership['all_joined']
 
-    if previously_member != currently_member:
-        db.update_membership_status(user_id, currently_member)
-
-        for referrer_id in db.get_referrers_of_user(user_id):
-            referral_record = next((r for r in db.get_referral_details(referrer_id) if r['referred_id'] == user_id), None)
-            if not referral_record or referral_record['is_valid_new_member'] == 0:
-                continue
-
-            username = user_info['username'] or user_info['first_name']
-            ref_pts = logic.calculate_points(referrer_id)
-
-            if currently_member:
-                msg = config.MESSAGES['referral_activated'].format(
-                    username=username,
-                    total_tickets=ref_pts['total_tickets'],
-                    referrals=ref_pts['referral_count']
-                )
-            else:
-                msg = config.MESSAGES['referral_left'].format(
-                    username=username,
-                    referrals=ref_pts['referral_count']
-                )
-
-            keyboard = [[build_button("📊 Vedi il Mio Stato", callback_data="user_stats", style=ButtonStyle.PRIMARY)]]
-            try:
-                await context.bot.send_message(chat_id=referrer_id, text=msg, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
-            except TelegramError:
-                pass
-
+    if await sync_membership(context, user_info, currently_member):
         if not currently_member and is_leaving and db.is_giveaway_active():
             channels_list_txt = format_channels_list_text(membership['channels'])
             msg = config.MESSAGES['user_left_channel'] + f"\n\n{channels_list_txt}"
@@ -265,16 +288,20 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Gestisce il comando /start con supporto per referral e verifica multi-canale"""
     user = update.effective_user
 
-    if not db.is_giveaway_active() and not is_admin(user.id):
-        await update.message.reply_text(config.MESSAGES['giveaway_not_started'])
-        return
+    if not is_admin(user.id):
+        if db.is_giveaway_ended():
+            await update.message.reply_text(config.MESSAGES['giveaway_ended'])
+            return
+        if not db.is_giveaway_active():
+            await update.message.reply_text(config.MESSAGES['giveaway_not_started'])
+            return
 
     membership = await check_user_channels_membership(context.bot, user.id)
     is_fully_joined = membership['all_joined']
 
     existing_user = db.get_user(user.id)
     if existing_user:
-        db.update_membership_status(user.id, is_fully_joined)
+        await sync_membership(context, existing_user, is_fully_joined)
         
         if not is_fully_joined:
             channels_list_txt = format_channels_list_text(membership['channels'])
@@ -285,8 +312,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=get_channels_join_keyboard(membership['channels'])
             )
         else:
-            bot_link = f"https://t.me/{config.BOT_USERNAME.replace('@', '')}?start={existing_user['referral_code']}"
-            pts = logic.calculate_points(user.id)
+            bot_link = logic.get_referral_link(user.id)
             status_text = "✅ <b>Sei qualificato per l'estrazione a 7 vincitori!</b>"
             msg = config.MESSAGES['welcome_back'].format(
                 link=bot_link,
@@ -307,7 +333,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif referrer:
             await update.message.reply_text(config.MESSAGES['self_referral'])
 
-    was_pre_existing = db.was_member_before_giveaway(user.id) or is_fully_joined
+    was_pre_existing = is_pre_existing_member(user.id, membership['channels'])
     referral_code = logic.generate_referral_code(user.id)
 
     db.create_user(
@@ -320,8 +346,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_member=is_fully_joined
     )
 
-    if referred_by and (was_pre_existing or db.is_user_marked_as_ineligible_leaver(user.id)):
-        username_referred = user.username or user.first_name
+    is_ineligible_referral = was_pre_existing or db.is_user_marked_as_ineligible_leaver(user.id)
+    if referred_by and is_ineligible_referral:
+        username_referred = safe_name(user.username, user.first_name, f"Utente {user.id}")
         msg = config.MESSAGES['pre_existing_member'].format(username=username_referred)
         try:
             await context.bot.send_message(chat_id=referred_by, text=msg, parse_mode=ParseMode.HTML)
@@ -337,19 +364,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_channels_join_keyboard(membership['channels'])
         )
     else:
-        if referred_by and not was_pre_existing:
-            ref_pts = logic.calculate_points(referred_by)
-            username_referred = user.username or user.first_name
-            ref_msg = config.MESSAGES['referral_activated'].format(
-                username=username_referred,
-                total_tickets=ref_pts['total_tickets'],
-                referrals=ref_pts['referral_count']
-            )
-            keyboard = [[build_button("📊 Vedi il Mio Stato", callback_data="user_stats", style=ButtonStyle.PRIMARY)]]
-            try:
-                await context.bot.send_message(chat_id=referred_by, text=ref_msg, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
-            except TelegramError:
-                pass
+        if referred_by and not is_ineligible_referral:
+            new_user = db.get_user(user.id)
+            if new_user:
+                await notify_referrers(context, new_user, now_member=True)
 
         bot_link = f"https://t.me/{config.BOT_USERNAME.replace('@', '')}?start={referral_code}"
         msg = config.MESSAGES['welcome_new'].format(link=bot_link)
@@ -362,11 +380,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Mostra il menu principale"""
     user_id = update.effective_user.id
-    if not db.get_user(user_id):
+    user_info = db.get_user(user_id)
+    if not user_info:
         await update.message.reply_text("❌ Usa /start per registrarti al giveaway.")
         return
 
     membership = await check_user_channels_membership(context.bot, user_id)
+    await sync_membership(context, user_info, membership['all_joined'])
     if not membership['all_joined']:
         channels_list_txt = format_channels_list_text(membership['channels'])
         await update.message.reply_text(
@@ -549,29 +569,17 @@ async def user_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if data == "check_membership":
         membership = await check_user_channels_membership(context.bot, user_id)
         if membership['all_joined']:
-            was_inactive = not bool(user_info_db['is_channel_member'])
-            db.update_membership_status(user_id, True)
-
-            if was_inactive:
-                for referrer_id in db.get_referrers_of_user(user_id):
-                    referral_record = next((r for r in db.get_referral_details(referrer_id) if r['referred_id'] == user_id), None)
-                    if referral_record and referral_record['is_valid_new_member'] == 1:
-                        username = user_info_db['username'] or user_info_db['first_name']
-                        ref_pts = logic.calculate_points(referrer_id)
-                        ref_msg = config.MESSAGES['referral_activated'].format(
-                            username=username,
-                            total_tickets=ref_pts['total_tickets'],
-                            referrals=ref_pts['referral_count']
-                        )
-                        keyboard = [[build_button("📊 Vedi il Mio Stato", callback_data="user_stats", style=ButtonStyle.PRIMARY)]]
-                        try:
-                            await context.bot.send_message(chat_id=referrer_id, text=ref_msg, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
-                        except TelegramError:
-                            pass
+            was_inactive = await sync_membership(context, user_info_db, True)
 
             await query.answer("✅ Ottimo! Sei iscritto a tutti i 2 canali!", show_alert=True)
-            bot_link = f"https://t.me/{config.BOT_USERNAME.replace('@', '')}?start={user_info_db['referral_code']}"
-            msg = config.MESSAGES['welcome_new'].format(link=bot_link)
+            bot_link = logic.get_referral_link(user_id)
+            if was_inactive:
+                msg = config.MESSAGES['welcome_new'].format(link=bot_link)
+            else:
+                msg = config.MESSAGES['welcome_back'].format(
+                    link=bot_link,
+                    participation_status="✅ <b>Sei qualificato per l'estrazione a 7 vincitori!</b>"
+                )
             await query.edit_message_text(
                 msg,
                 parse_mode=ParseMode.HTML,
@@ -588,8 +596,8 @@ async def user_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     membership = await check_user_channels_membership(context.bot, user_id)
+    await sync_membership(context, user_info_db, membership['all_joined'])
     if not membership['all_joined']:
-        db.update_membership_status(user_id, False)
         await query.answer()
         channels_list_txt = format_channels_list_text(membership['channels'])
         await query.edit_message_text(
@@ -598,9 +606,6 @@ async def user_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             reply_markup=get_channels_join_keyboard(membership['channels'])
         )
         return
-    else:
-        if not user_info_db['is_channel_member']:
-            db.update_membership_status(user_id, True)
 
     await query.answer()
 
@@ -684,15 +689,26 @@ async def send_broadcast(context: ContextTypes.DEFAULT_TYPE, admin_id: int, mess
     start_time = time.time()
     
     for i, user in enumerate(all_users, 1):
-        try:
-            await context.bot.send_message(
-                chat_id=user['user_id'],
-                text=message,
-                parse_mode=ParseMode.HTML
-            )
-            success += 1
-        except TelegramError as e:
-            logger.warning(f"Failed to send broadcast to {user['user_id']}: {e}")
+        for attempt in range(3):
+            try:
+                await context.bot.send_message(
+                    chat_id=user['user_id'],
+                    text=message,
+                    parse_mode=ParseMode.HTML
+                )
+                success += 1
+                break
+            except RetryAfter as e:
+                # Flood limit: attendi il tempo richiesto da Telegram e riprova
+                delay = e.retry_after
+                delay = delay.total_seconds() if hasattr(delay, "total_seconds") else delay
+                logger.warning(f"Flood limit durante il broadcast, attendo {delay}s")
+                await asyncio.sleep(float(delay) + 1)
+            except TelegramError as e:
+                logger.warning(f"Failed to send broadcast to {user['user_id']}: {e}")
+                failed += 1
+                break
+        else:
             failed += 1
         
         if i % 10 == 0 or i == total:
@@ -719,19 +735,28 @@ async def send_broadcast(context: ContextTypes.DEFAULT_TYPE, admin_id: int, mess
     success_rate = int((success / total) * 100) if total > 0 else 0
     
     keyboard = [[build_button("⬅️ Torna al Menu", callback_data="admin_menu", style=ButtonStyle.TRANSPARENT)]]
-    await context.bot.edit_message_text(
-        chat_id=admin_id,
-        message_id=progress_message_id,
-        text=config.MESSAGES['broadcast_completed'].format(
-            total=total,
-            success=success,
-            failed=failed,
-            success_rate=success_rate,
-            duration=duration
-        ),
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(keyboard)
+    completed_text = config.MESSAGES['broadcast_completed'].format(
+        total=total,
+        success=success,
+        failed=failed,
+        success_rate=success_rate,
+        duration=duration
     )
+    try:
+        await context.bot.edit_message_text(
+            chat_id=admin_id,
+            message_id=progress_message_id,
+            text=completed_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except TelegramError:
+        await context.bot.send_message(
+            chat_id=admin_id,
+            text=completed_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Gestisce messaggi di testo (attesa broadcast da admin)"""
@@ -742,13 +767,22 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         
         broadcast_message = update.message.text
+
+        # Anteprima reale: invia il messaggio all'admin esattamente come lo vedranno gli utenti.
+        # Se l'HTML non è valido, Telegram lo rifiuta qui e non dopo, durante l'invio a tutti.
+        try:
+            await update.message.reply_text(broadcast_message, parse_mode=ParseMode.HTML)
+        except BadRequest as e:
+            await update.message.reply_text(
+                f"❌ <b>HTML non valido:</b> {html.escape(str(e))}\n\nCorreggi il messaggio e invialo di nuovo.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+
         context.user_data['broadcast_message'] = broadcast_message
         context.user_data.pop('awaiting_broadcast_message', None)
         
-        all_users = db.get_all_participants()
-        user_count = len(all_users)
-        
-        preview = broadcast_message[:500] + "..." if len(broadcast_message) > 500 else broadcast_message
+        user_count = len(db.get_all_participants())
         
         keyboard = [
             [build_button("✅ Sì, invia a tutti", callback_data="broadcast_confirm", style=ButtonStyle.SUCCESS)],
@@ -756,10 +790,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         ]
         
         await update.message.reply_text(
-            config.MESSAGES['broadcast_confirm'].format(
-                user_count=user_count,
-                message_preview=preview
-            ),
+            config.MESSAGES['broadcast_confirm'].format(user_count=user_count),
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -767,6 +798,31 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ============================================================================
 # ADMIN COMMANDS & CALLBACKS
 # ============================================================================
+
+async def draw_verified_winners(context: ContextTypes.DEFAULT_TYPE, max_attempts: int = 20) -> Optional[dict]:
+    """
+    Estrae i vincitori verificando in tempo reale che siano ancora iscritti a tutti i canali.
+    Chi non lo è più viene segnato come non iscritto e l'estrazione viene ripetuta.
+    """
+    result = None
+    for _ in range(max_attempts):
+        result = logic.draw_7_winners()
+        if not result:
+            return None
+        not_members = []
+        for uid in logic.get_winner_ids(result):
+            membership = await check_user_channels_membership(context.bot, uid)
+            if not membership['all_joined']:
+                not_members.append(uid)
+        if not not_members:
+            return result
+        for uid in not_members:
+            user_info = db.get_user(uid)
+            if user_info:
+                await sync_membership(context, user_info, False)
+        logger.info(f"Estrazione ripetuta: vincitori non più iscritti {not_members}")
+    logger.warning("Impossibile verificare tutti i vincitori dopo il numero massimo di tentativi")
+    return result
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Pannello di amministrazione del giveaway"""
@@ -789,6 +845,10 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     data = query.data
+
+    if data in ("admin_start_giveaway", "start_giveaway_confirm") and db.is_giveaway_ended():
+        await query.edit_message_text("ℹ️ Il giveaway è già concluso: l'estrazione è stata effettuata.")
+        return
 
     if data == "admin_start_giveaway":
         if db.is_giveaway_active():
@@ -862,9 +922,22 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             ),
             parse_mode=ParseMode.HTML
         )
-        await send_broadcast(context, user_id, broadcast_message, progress_msg.message_id)
+        # In background: il bot continua a rispondere agli altri utenti durante l'invio
+        context.application.create_task(
+            send_broadcast(context, user_id, broadcast_message, progress_msg.message_id),
+            update=update
+        )
 
     elif data == "admin_draw_winner":
+        saved = db.get_draw_result()
+        if saved:
+            keyboard = [[build_button("⬅️ Torna al Menu", callback_data="admin_menu", style=ButtonStyle.TRANSPARENT)]]
+            await query.edit_message_text(
+                "ℹ️ <b>Estrazione già effettuata.</b> Risultato salvato:\n\n" + logic.format_draw_results(saved),
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.HTML
+            )
+            return
         keyboard = [
             [build_button("🎲 Sì, estrai i 7 vincitori!", callback_data="draw_winner_confirm", style=ButtonStyle.SUCCESS)],
             [build_button("❌ Annulla", callback_data="admin_menu", style=ButtonStyle.DANGER)]
@@ -881,7 +954,13 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         )
 
     elif data == "draw_winner_confirm":
-        result = logic.draw_7_winners()
+        result = db.get_draw_result()
+        if not result:
+            await query.edit_message_text("⏳ <b>Estrazione in corso...</b> Verifico l'iscrizione dei vincitori ai canali.", parse_mode=ParseMode.HTML)
+            result = await draw_verified_winners(context)
+            if result and not db.save_draw_result(result):
+                # Un'altra estrazione è stata salvata nel frattempo: mostra quella ufficiale
+                result = db.get_draw_result()
         message = logic.format_draw_results(result)
         keyboard = [[build_button("⬅️ Torna al Menu", callback_data="admin_menu", style=ButtonStyle.TRANSPARENT)]]
         await query.edit_message_text(
@@ -891,6 +970,8 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         )
 
     elif data == "admin_menu":
+        context.user_data.pop('awaiting_broadcast_message', None)
+        context.user_data.pop('broadcast_message', None)
         keyboard = get_admin_menu_keyboard()
         await query.edit_message_text(
             "🔧 <b>Pannello Amministratore Giveaway Fortnite</b>\n\nSeleziona un'operazione:",
