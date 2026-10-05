@@ -53,7 +53,12 @@ EFFECT_CONFETTI = "5046509860389126442"  # 🎉
 EFFECT_FIRE = "5104841245755180586"      # 🔥
 EFFECT_HEART = "5044134455711629726"     # ❤️
 
-SHARE_TEXT = "🎮 Partecipa con me al Giveaway Fortnite! 7 premi in palio, entri gratis in 1 minuto 👇"
+# Data dell'estrazione: è solo informativa (testi e conto alla rovescia).
+# L'estrazione NON parte da sola: la fa l'admin con il pulsante "🎲 Estrai i 7 Vincitori".
+DRAW_DATE = "2026-10-17"              # formato AAAA-MM-GG
+DRAW_DATE_TEXT = "sabato 17 ottobre"  # come viene scritta nei messaggi
+
+SHARE_TEXT = f"🎮 Partecipa con me al Giveaway Fortnite! 7 premi in palio, estrazione {DRAW_DATE_TEXT}. Entri gratis in 1 minuto 👇"
 
 class ButtonStyle:
     PRIMARY = "primary"
@@ -76,6 +81,7 @@ Devi essere iscritto a <b>questi 2 canali</b>:
     "invited_channels_prompt": """
 🎁 <b>Un tuo amico ti ha invitato al Giveaway Fortnite!</b>
 In palio ci sono <b>7 premi</b> e partecipare è gratis.
+📅 Estrazione: <b>[DATA_ESTRAZIONE]</b>
 
 Devi solo essere iscritto a <b>questi 2 canali</b>:
 {channels_list}
@@ -106,7 +112,8 @@ Invita i tuoi amici: ogni amico che entra = <b>+1 biglietto</b> 🎟️
 Il tuo link personale (tocca per copiarlo):
 <code>{link}</code>
 
-🏆 In palio ci sono <b>7 premi</b>. I vincitori verranno contattati qui su Telegram.
+🏆 In palio ci sono <b>7 premi</b>.
+📅 Estrazione: <b>[DATA_ESTRAZIONE]</b> – i vincitori verranno contattati qui su Telegram.
 """,
 
     "welcome_back": """
@@ -116,6 +123,8 @@ Il tuo link personale (tocca per copiarlo):
 
 🎟️ Biglietti: <b>{total_tickets}</b>
 👥 Amici invitati: <b>{referrals}</b>
+
+{countdown}
 
 👉 Vuoi più biglietti? Tocca <b>📤 Invita amici</b>.
 """,
@@ -131,6 +140,8 @@ Il tuo link personale (tocca per copiarlo):
 
 🏆 Posizione in classifica: <b>#{rank}</b>
 🎲 Probabilità di vincita: <b>~{win_probability}%</b>
+
+{countdown}
 
 🔗 Il tuo link per invitare (tocca per copiarlo):
 <code>{link}</code>
@@ -244,9 +255,12 @@ Ogni amico che entra nei 2 canali = <b>+1 biglietto</b>.
 Conta solo chi <b>non era già</b> nei canali prima del giveaway, e deve restare iscritto a tutti e 2.
 
 <b>5. Cosa succede se esco da un canale?</b>
-Non partecipi più finché non rientri. <b>Non uscire fino alla fine!</b> ⚠️
+Non partecipi più finché non rientri. <b>Non uscire fino all'estrazione!</b> ⚠️
 
-<b>6. Come so se ho vinto?</b>
+<b>6. Quando c'è l'estrazione?</b>
+📅 <b>[DATA_ESTRAZIONE]</b>. Fino ad allora puoi continuare a invitare amici e prendere biglietti.
+
+<b>7. Come so se ho vinto?</b>
 I vincitori vengono contattati in privato qui su Telegram.
 
 <i>Qualcosa non funziona? Scrivi /start per ricominciare.</i>
@@ -274,6 +288,8 @@ Oppure copia il tuo link (tocca per copiarlo) e incollalo dove vuoi (WhatsApp, I
 <code>{link}</code>
 
 👥 Amici invitati finora: <b>{referrals}</b>
+
+{countdown}
 """,
 
     "main_menu": "🎯 <b>Menu del giveaway</b>\n\nCosa vuoi fare? Tocca un pulsante 👇",
@@ -304,3 +320,6 @@ Valgono solo gli amici <b>nuovi</b>, che entrano grazie al tuo link.
 
     "group_redirect": "👋 Per partecipare al giveaway devi scrivermi <b>in privato</b>.\n\nTocca il pulsante qui sotto 👇"
 }
+
+# Inserisce la data dell'estrazione in tutti i testi che la citano
+MESSAGES = {key: text.replace("[DATA_ESTRAZIONE]", DRAW_DATE_TEXT) for key, text in MESSAGES.items()}

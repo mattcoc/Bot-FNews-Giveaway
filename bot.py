@@ -448,6 +448,7 @@ def welcome_back_text(user_id: int) -> str:
         participation_status=logic.participation_status(pts),
         total_tickets=pts['total_tickets'],
         referrals=pts['referral_count'],
+        countdown=logic.draw_countdown(),
     )
 
 async def get_ready_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[dict]:
@@ -739,7 +740,7 @@ async def show_invite(update: Update, context: ContextTypes.DEFAULT_TYPE, user_i
     ])
     await send_or_edit(
         update,
-        config.MESSAGES['invite'].format(link=bot_link, referrals=pts['referral_count']),
+        config.MESSAGES['invite'].format(link=bot_link, referrals=pts['referral_count'], countdown=logic.draw_countdown()),
         keyboard,
     )
 

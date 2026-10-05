@@ -4,6 +4,7 @@ Logica di business per il giveaway Fortnite (7 Vincitori, Multi-canale e Sistema
 
 import random
 import logging
+from datetime import date
 from typing import Optional, List, Dict
 import config
 from db_manager import DatabaseManager
@@ -167,6 +168,25 @@ class GiveawayLogic:
         prob = (user_tickets / total_tickets_all) * 100
         return round(prob, 2)
     
+    def draw_countdown(self) -> str:
+        """
+        Riga con il conto alla rovescia verso l'estrazione (solo informativa:
+        l'estrazione la avvia sempre l'admin a mano). Vuota a giveaway concluso.
+        """
+        if self.db.is_giveaway_ended():
+            return ""
+        try:
+            days = (date.fromisoformat(config.DRAW_DATE) - date.today()).days
+        except ValueError:
+            return f"📅 Estrazione: <b>{config.DRAW_DATE_TEXT}</b>"
+        if days > 1:
+            return f"⏳ Mancano <b>{days} giorni</b> all'estrazione di <b>{config.DRAW_DATE_TEXT}</b>!"
+        if days == 1:
+            return f"⏳ L'estrazione è <b>domani</b> ({config.DRAW_DATE_TEXT})! Ultime ore per invitare amici 🔥"
+        if days == 0:
+            return f"🎲 L'estrazione è <b>oggi</b> ({config.DRAW_DATE_TEXT})! Resta iscritto ai canali 🍀"
+        return "🎲 L'estrazione è in arrivo, resta iscritto ai canali! 🍀"
+
     def participation_status(self, pts: dict) -> str:
         """Riga di stato coerente in tutte le schermate (anche a giveaway concluso)."""
         if self.db.is_giveaway_ended():
@@ -189,6 +209,7 @@ class GiveawayLogic:
         return config.MESSAGES['stats'].format(
             participation_status=self.participation_status(pts),
             tickets_bar=tickets_bar(pts['total_tickets']),
+            countdown=self.draw_countdown(),
             link=bot_link,
             referrals=pts['referral_count'],
             base_tickets=pts['base_tickets'],
@@ -227,6 +248,8 @@ class GiveawayLogic:
         return (
             "<h2>📊 Il tuo stato</h2>\n"
             f"<p>{status_line}</p>\n"
+            + (f"<p>{self.draw_countdown()}</p>\n" if self.draw_countdown() else "")
+            +
             "<hr/>\n"
             "<h3>🔗 Il tuo link per invitare</h3>\n"
             f"<pre><code>{_escape_html(bot_link)}</code></pre>\n"
@@ -322,8 +345,10 @@ class GiveawayLogic:
             "<h3>4. Il mio amico non conta, perché?</h3>\n"
             "<p>Conta solo chi <b>non era già</b> nei canali prima del giveaway, e deve restare iscritto a tutti e 2.</p>\n"
             "<h3>5. Cosa succede se esco da un canale?</h3>\n"
-            "<p>Non partecipi più finché non rientri. <b>Non uscire fino alla fine!</b> ⚠️</p>\n"
-            "<h3>6. Come so se ho vinto?</h3>\n"
+            "<p>Non partecipi più finché non rientri. <b>Non uscire fino all'estrazione!</b> ⚠️</p>\n"
+            "<h3>6. Quando c'è l'estrazione?</h3>\n"
+            f"<p>📅 <b>{config.DRAW_DATE_TEXT}</b>. Fino ad allora puoi continuare a invitare amici e prendere biglietti.</p>\n"
+            "<h3>7. Come so se ho vinto?</h3>\n"
             "<p>I vincitori vengono contattati in privato qui su Telegram.</p>\n"
             "<footer>Qualcosa non funziona? Scrivi /start per ricominciare.</footer>"
         )
