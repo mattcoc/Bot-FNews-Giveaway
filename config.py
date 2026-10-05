@@ -36,6 +36,30 @@ REFERRAL_WINNERS_COUNT = 1
 
 DATABASE_NAME = "giveaway.db"
 
+# Pulsanti fissi sotto la tastiera (testo esatto inviato dall'utente quando li tocca)
+BTN_STATUS = "📊 Il mio stato"
+BTN_INVITE = "📤 Invita amici"
+BTN_RANKING = "🏆 Classifica"
+BTN_HELP = "❓ Aiuto"
+
+# Ogni quanti minuti ricontrollare l'iscrizione di tutti gli utenti, per recuperare
+# uscite/entrate che Telegram non ha notificato (es. bot spento o riavviato).
+MEMBERSHIP_RECHECK_MINUTES = 30
+
+# Animazioni: effetti a schermo intero di Telegram sui messaggi importanti (solo chat private).
+# Metti False per disattivarle. Se un effetto non è disponibile, il messaggio parte comunque senza.
+ANIMATIONS_ENABLED = True
+EFFECT_CONFETTI = "5046509860389126442"  # 🎉
+EFFECT_FIRE = "5104841245755180586"      # 🔥
+EFFECT_HEART = "5044134455711629726"     # ❤️
+
+# Data dell'estrazione: è solo informativa (testi e conto alla rovescia).
+# L'estrazione NON parte da sola: la fa l'admin con il pulsante "🎲 Estrai i 7 Vincitori".
+DRAW_DATE = "2026-10-17"              # formato AAAA-MM-GG
+DRAW_DATE_TEXT = "sabato 17 ottobre"  # come viene scritta nei messaggi
+
+SHARE_TEXT = f"🎮 Partecipa con me al Giveaway Fortnite! 7 premi in palio, estrazione {DRAW_DATE_TEXT}. Entri gratis in 1 minuto 👇"
+
 class ButtonStyle:
     PRIMARY = "primary"
     SUCCESS = "success"
@@ -44,142 +68,122 @@ class ButtonStyle:
 
 MESSAGES = {
     "channels_prompt": """
-❌ <b>Iscrizione ai Canali Incompleta!</b>
+👋 <b>Ciao! Ti manca solo un passo per partecipare.</b>
 
-Per partecipare al Giveaway e concorrere per uno dei <b>7 PREMI IN PALIO</b>, devi essere iscritto a tutti e 2 i canali partner ufficiali:
-
+Devi essere iscritto a <b>questi 2 canali</b>:
 {channels_list}
 
-👉 Unisciti ai canali mancanti usando i pulsanti qui sotto, poi clicca su <b>🔄 Verifica Iscrizioni</b>!
+<b>Cosa fare:</b>
+1️⃣ Tocca i pulsanti <b>➕ Entra</b> qui sotto e nel canale premi <b>UNISCITI</b>
+2️⃣ Torna qui e tocca <b>✅ HO FATTO, CONTROLLA</b>
 """,
 
     "invited_channels_prompt": """
-🎁 <b>Sei stato invitato al Mega Giveaway Fortnite!</b>
+🎁 <b>Un tuo amico ti ha invitato al Giveaway Fortnite!</b>
+In palio ci sono <b>7 premi</b> e partecipare è gratis.
+📅 Estrazione: <b>[DATA_ESTRAZIONE]</b>
 
-Un tuo amico ti ha invitato a partecipare! In palio ci sono ben <b>7 VINCITORI</b>!
-
-<b>Per qualificarti al giveaway:</b>
-1️⃣ Unisciti a tutti e 2 i canali partner qui sotto:
+Devi solo essere iscritto a <b>questi 2 canali</b>:
 {channels_list}
-2️⃣ Clicca su <b>🔄 Verifica Iscrizioni</b> per confermare la tua iscrizione e ottenere subito il tuo link referral!
+
+<b>Cosa fare:</b>
+1️⃣ Tocca i pulsanti <b>➕ Entra</b> qui sotto e nel canale premi <b>UNISCITI</b>
+2️⃣ Torna qui e tocca <b>✅ HO FATTO, CONTROLLA</b>
 """,
 
     "user_left_channel": """
-⚠️ <b>Attenzione: hai lasciato uno dei canali ufficiali!</b>
+⚠️ <b>Sei uscito da un canale del giveaway!</b>
 
-Per partecipare all'estrazione finale e mantenere attivi i tuoi biglietti e inviti, devi rimanere iscritto a tutti e 2 i canali partner.
+Così <b>non partecipi più</b> all'estrazione e i tuoi biglietti sono in pausa.
 
-👉 Unisciti di nuovo al canale e premi <b>🔄 Verifica Iscrizioni</b> per riattivare la tua partecipazione!
+👉 Rientra nel canale qui sotto e tocca <b>✅ HO FATTO, CONTROLLA</b>.
 """,
 
     "welcome_new": """
-🎉 <b>BENVENUTO NEL NUOVO GIVEAWAY FORTNITE!</b>
+🎉 <b>FATTO! Sei dentro il giveaway!</b>
 
-✅ <b>Sei ufficialmente iscritto all'estrazione!</b>
+✅ Hai già <b>1 biglietto</b> per l'estrazione.
 
-┏━━━━━━━━━━━━━━━━━━━━━
-🔗 <b>IL TUO LINK REFERRAL PERSONALE:</b>
+🚀 <b>Vuoi più possibilità di vincere?</b>
+Invita i tuoi amici: ogni amico che entra = <b>+1 biglietto</b> 🎟️
 
+👉 Tocca <b>📤 Invita amici</b> qui sotto, scegli a chi mandarlo e invia. Tutto qui!
+
+Il tuo link personale (tocca per copiarlo):
 <code>{link}</code>
 
-💡 <i>Condividi questo link con i tuoi amici: ogni nuovo iscritto ti fa guadagnare +1 Biglietto per l'estrazione e ti fa scalare la classifica!</i>
-┗━━━━━━━━━━━━━━━━━━━━━
-
-🏆 <b>BEN 7 VINCITORI IN PALIO:</b>
-🥇 <b>1° Classificato:</b> chi invita più amici vince subito il 1° Premio!
-🎲 <b>5 Estratti a Sorte:</b> tra tutti gli iscritti (più inviti = più biglietti nell'urna!)
-👥 <b>1 Amico degli Estratti:</b> estratto a sorte tra gli amici dei 5 vincitori!
-
-🎯 <b>Meccanica Porta un Amico:</b>
-Se vieni estratto tu tra i 5 vincitori, <b>uno dei tuoi amici invitati vince automaticamente con te!</b>
-
-📊 Usa i pulsanti qui sotto per navigare nel menu!
+🏆 In palio ci sono <b>7 premi</b>.
+📅 Estrazione: <b>[DATA_ESTRAZIONE]</b> – i vincitori verranno contattati qui su Telegram.
 """,
 
     "welcome_back": """
-👋 <b>Bentornato nel Giveaway Fortnite!</b>
-
-┏━━━━━━━━━━━━━━━━━━━━━
-🔗 <b>IL TUO LINK REFERRAL:</b>
-
-<code>{link}</code>
-
-💡 Condividilo con i tuoi amici per scalare la classifica!
-┗━━━━━━━━━━━━━━━━━━━━━
+👋 <b>Bentornato!</b>
 
 {participation_status}
 
-📊 Usa i pulsanti qui sotto per controllare i tuoi biglietti e la tua posizione!
+🎟️ Biglietti: <b>{total_tickets}</b>
+👥 Amici invitati: <b>{referrals}</b>
+
+{countdown}
+
+👉 Vuoi più biglietti? Tocca <b>📤 Invita amici</b>.
 """,
 
     "stats": """
-📊 <b>Il Tuo Stato nel Giveaway</b>
+📊 <b>IL TUO STATO</b>
 
 {participation_status}
 
-┏━━━━━━━━━━━━━━━━━━━━━
-🔗 <b>IL TUO LINK REFERRAL:</b>
-
-<code>{link}</code>
-
-💡 Condividi questo link per scalare la classifica e aumentare le tue chance!
-┗━━━━━━━━━━━━━━━━━━━━━
-
-┏━━━━━━━━━━━━━━━━━━━━━
-🎟️ <b>I TUOI BIGLIETTI E INVITI:</b>
-
-• Biglietto iscrizione ai 2 canali: <b>{base_tickets}</b>
-• Amici invitati validi: <b>{referrals}</b> (+{referral_tickets} biglietti)
-🎯 <b>BIGLIETTI TOTALI NELL'URNA: {total_tickets}</b>
+🎟️ <b>Biglietti: {total_tickets}</b>  {tickets_bar}
+   • {base_tickets} perché sei iscritto ai canali
+   • +{referral_tickets} dagli amici invitati ({referrals})
 
 🏆 Posizione in classifica: <b>#{rank}</b>
-📈 Probabilità estrazione a sorte: <b>~{win_probability}%</b>
-┗━━━━━━━━━━━━━━━━━━━━━
+🎲 Probabilità di vincita: <b>~{win_probability}%</b>
 
-👥 <i>Ricorda: se vieni estratto tra i 5 vincitori, 1 dei tuoi invitati vincerà un premio con te!</i>
+{countdown}
+
+🔗 Il tuo link per invitare (tocca per copiarlo):
+<code>{link}</code>
+
+💡 <i>Se vieni estratto tra i 5, i tuoi amici invitati partecipano all'estrazione del premio bonus!</i>
 """,
 
-    "self_referral": "❌ Non puoi utilizzare il tuo stesso link referral!",
+    "self_referral": """😅 Questo è il <b>tuo</b> link! Non devi usarlo tu: mandalo ai tuoi amici.""",
 
     "referral_activated": """
-🎉 <b>NUOVO INVITO CONFERMATO!</b>
+🎉 <b>Un amico è entrato grazie a te!</b>
 
-<b>{username}</b> si è iscritto a tutti i 2 canali grazie a te!
+👤 <b>{username}</b> si è iscritto ai 2 canali.
+🎟️ Hai guadagnato <b>+1 biglietto</b>!
 
-🎟️ <b>+1 Biglietto per l'estrazione!</b>
-📊 Biglietti totali: <b>{total_tickets}</b>
-👥 Inviti validi totali: <b>{referrals}</b>
+📊 Ora hai <b>{total_tickets}</b> biglietti e <b>{referrals}</b> amici invitati.
 
-┏━━━━━━━━━━━━━━━━━━━━━
-💡 <b>Continua a invitare amici!</b>
-• Più inviti fai, più scali la vetta per il <b>1° Posto</b>!
-• Se vieni estratto tra i 5 vincitori, <b>uno dei tuoi amici vincerà insieme a te</b>!
-┗━━━━━━━━━━━━━━━━━━━━━
+👉 Continua così: più amici = più possibilità di vincere!
 """,
 
     "referral_left": """
-⚠️ <b>Invito Sospeso!</b>
+⚠️ <b>Un tuo amico è uscito da un canale</b>
 
-<b>{username}</b> ha lasciato uno dei canali ufficiali.
-❌ Il suo invito non verrà conteggiato finché non rientra in tutti e 2 i canali.
+👤 <b>{username}</b> non conta più finché non rientra in tutti e 2 i canali.
+Prova a scrivergli! 😉
 
-📊 Inviti validi attuali: <b>{referrals}</b>
+👥 Amici validi adesso: <b>{referrals}</b>
 """,
 
     "referral_reactivated": """
-✅ <b>Invito Riattivato!</b>
+✅ <b>Un tuo amico è rientrato!</b>
 
-<b>{username}</b> è rientrato in tutti i canali partner!
-🎟️ Biglietto e punteggio ripristinati con successo!
+👤 <b>{username}</b> è di nuovo in tutti e 2 i canali: il suo biglietto torna a contare.
 
-📊 Inviti validi: <b>{referrals}</b>
+👥 Amici validi adesso: <b>{referrals}</b>
 """,
 
     "pre_existing_member": """
-⚠️ <b>Invito non valido</b>
+😕 <b>Questo amico non conta</b>
 
-L'utente <b>{username}</b> era già iscritto ai canali prima dell'inizio del giveaway.
-❌ Solo le <u>nuove entrate</u> contano come inviti validi.
+👤 <b>{username}</b> era già iscritto ai canali prima del giveaway.
+Valgono solo gli amici <b>nuovi</b>, che entrano grazie al tuo link.
 """,
 
     "broadcast_prompt": """
@@ -200,11 +204,7 @@ Scrivi il messaggio che vuoi inviare a <b>tutti gli utenti</b> registrati nel bo
 
 Il messaggio verrà inviato a <b>{user_count} utenti</b>.
 
-┏━━━━━━━━━━━━━━━━━━━━━
-<b>📝 ANTEPRIMA MESSAGGIO:</b>
-
-{message_preview}
-┗━━━━━━━━━━━━━━━━━━━━━
+👆 L'anteprima qui sopra è esattamente il messaggio che riceveranno.
 
 ⚠️ <b>Sei sicuro di voler procedere?</b>
 """,
@@ -234,38 +234,92 @@ Risultati parziali: ✅ {success} | ❌ {failed}
 """,
 
     "help": """
-ℹ️ <b>Come Funziona il Giveaway a 7 Vincitori</b>
+❓ <b>AIUTO – Come funziona</b>
 
-Abbiamo rinnovato il format per renderlo <b>inclusivo, meritocratico e senza frizione</b>!
+<b>1. Come partecipo?</b>
+Entra in questi 2 canali e premi <b>UNISCITI</b>:
+{channels}
+Fatto! Hai già <b>1 biglietto</b> 🎟️
 
-┏━━━━━━━━━━━━━━━━━━━━━
-🎯 <b>COME PARTECIPARE (Zero Frizione):</b>
-1️⃣ Iscriviti a tutti e 2 i canali ufficiali:
-• @FortniteNews
-• @FortniteBundles
-2️⃣ Sei subito dentro l'estrazione con <b>1 Biglietto garantito</b>!
+<b>2. Come aumento le possibilità di vincere?</b>
+Tocca <b>📤 Invita amici</b> e manda il tuo link.
+Ogni amico che entra nei 2 canali = <b>+1 biglietto</b>.
 
-┏━━━━━━━━━━━━━━━━━━━━━
-🏆 <b>I 7 VINCITORI IN PALIO:</b>
+<b>3. Quante persone vincono?</b>
+7 persone:
+🥇 1 – chi invita più amici
+🎲 5 – estratti a sorte (più biglietti = più possibilità)
+👥 1 – un amico invitato da uno dei 5 estratti
 
-🥇 <b>1. Primo Classificato (Top Referrer)</b>
-Chi invita il maggior numero di amici vince direttamente il 1° Premio! Nessun limite massimo agli inviti: più amici porti, più aumenti il distacco.
+<b>4. Il mio amico non conta, perché?</b>
+Conta solo chi <b>non era già</b> nei canali prima del giveaway, e deve restare iscritto a tutti e 2.
 
-🎲 <b>2-6. 5 Estratti a Sorte</b>
-5 vincitori estratti a sorte tra tutti i partecipanti idonei.
-Ogni amico invitato ti assegna <b>+1 Biglietto extra</b> nell'urna dell'estrazione (più inviti = probabilità moltiplicate!).
+<b>5. Cosa succede se esco da un canale?</b>
+Non partecipi più finché non rientri. <b>Non uscire fino all'estrazione!</b> ⚠️
 
-👥 <b>7. 1 Amico tra gli Invitati dei 5 Estratti</b>
-Tra tutti gli amici invitati dai 5 vincitori estratti a sorte, viene estratto a sorte <b>1 vincitore bonus</b>!
-Se vieni estratto tu tra i 5, <b>fai vincere anche un tuo amico</b>!
+<b>6. Quando c'è l'estrazione?</b>
+📅 <b>[DATA_ESTRAZIONE]</b>. Fino ad allora puoi continuare a invitare amici e prendere biglietti.
 
-┏━━━━━━━━━━━━━━━━━━━━━
-🔗 <b>COME INVITARE AMICI:</b>
-Copia il tuo link personale da "📊 Il Mio Stato" e condividilo ovunque (Telegram, WhatsApp, Instagram, TikTok, Discord, ecc.).
-Valgono solo i nuovi iscritti che completano l'accesso ai 2 canali.
+<b>7. Come so se ho vinto?</b>
+I vincitori vengono contattati in privato qui su Telegram.
 
-Buona fortuna a tutti! 🍀
+<i>Qualcosa non funziona? Scrivi /start per ricominciare.</i>
 """,
 
-    "giveaway_not_started": "⚠️ Il giveaway non è ancora iniziato. Riprova più tardi!"
+    "giveaway_not_started": """⏳ Il giveaway non è ancora iniziato!
+
+Torna tra un po' e scrivi /start 😉""",
+
+    "giveaway_ended": """🏁 <b>Il giveaway è finito!</b>
+
+L'estrazione dei vincitori è già stata fatta. Grazie a tutti per aver partecipato! 💙""",
+
+    "invite": """
+📤 <b>INVITA I TUOI AMICI</b>
+
+Ogni amico che entra nei 2 canali = <b>+1 biglietto</b> per te 🎟️
+
+<b>Come fare (facilissimo):</b>
+1️⃣ Tocca <b>📤 Manda ai tuoi amici</b> qui sotto
+2️⃣ Scegli l'amico o il gruppo
+3️⃣ Premi invia ✅
+
+Oppure copia il tuo link (tocca per copiarlo) e incollalo dove vuoi (WhatsApp, Instagram, TikTok...):
+<code>{link}</code>
+
+👥 Amici invitati finora: <b>{referrals}</b>
+
+{countdown}
+""",
+
+    "main_menu": "🎯 <b>Menu del giveaway</b>\n\nCosa vuoi fare? Tocca un pulsante 👇",
+
+    "keyboard_hint": "👇 <b>I pulsanti del giveaway sono sempre qui sotto</b>, al posto della tastiera.",
+
+    "unknown_text": """🤔 <b>Non ho capito.</b>
+
+Non serve scrivere: usa i <b>pulsanti</b> 👇
+Se non li vedi, scrivi /start""",
+
+    "not_registered": "👋 Prima devi iscriverti al giveaway: tocca qui 👉 /start",
+
+    "former_leaver_referral": """
+😕 <b>Questo amico non conta</b>
+
+👤 <b>{username}</b> era già nei canali durante il giveaway ed è uscito.
+Valgono solo gli amici <b>nuovi</b>, che entrano grazie al tuo link.
+""",
+
+    "referrer_paused_note": "\n⚠️ <b>Attenzione:</b> tu non sei più in tutti e 2 i canali, quindi i tuoi biglietti non contano! Rientra e tocca /start.",
+
+    "channels_missing_header": "❌ <b>Manca ancora: {missing}</b>\n<i>Se ti sei appena iscritto, aspetta qualche secondo e riprova.</i>\n",
+
+    "checking_channels": "🔍 <b>Controllo le tue iscrizioni...</b>\n\n{lines}",
+
+    "check_unavailable": "⚠️ <b>Non riesco a controllare le iscrizioni in questo momento.</b>\n\nRiprova tra qualche secondo 🙏",
+
+    "group_redirect": "👋 Per partecipare al giveaway devi scrivermi <b>in privato</b>.\n\nTocca il pulsante qui sotto 👇"
 }
+
+# Inserisce la data dell'estrazione in tutti i testi che la citano
+MESSAGES = {key: text.replace("[DATA_ESTRAZIONE]", DRAW_DATE_TEXT) for key, text in MESSAGES.items()}

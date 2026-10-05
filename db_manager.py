@@ -4,6 +4,7 @@ Gestione database SQLite per il giveaway Fortnite
 
 import sqlite3
 import logging
+import json
 from typing import Optional, List, Dict
 
 logger = logging.getLogger(__name__)
@@ -77,17 +78,23 @@ class DatabaseManager:
         """)
 
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS videos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                video_url TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                rejection_reason TEXT,
-                submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(user_id),
-                UNIQUE(user_id)
+            CREATE TABLE IF NOT EXISTS draw_results (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                result_json TEXT NOT NULL,
+                drawn_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # Migrazione: colonna per distinguere prima attivazione e riattivazione di un invito
+        columns = [row['name'] for row in cursor.execute("PRAGMA table_info(referral_tracking)").fetchall()]
+        if 'activated_at' not in columns:
+            cursor.execute("ALTER TABLE referral_tracking ADD COLUMN activated_at TIMESTAMP")
+            # Gli inviti già validi e attivi risultano già notificati
+            cursor.execute("""
+                UPDATE referral_tracking SET activated_at = CURRENT_TIMESTAMP
+                WHERE is_valid_new_member = 1
+                  AND referred_id IN (SELECT user_id FROM users WHERE is_channel_member = 1)
+            """)
         
         conn.commit()
         conn.close()
@@ -133,10 +140,21 @@ class DatabaseManager:
         conn.close()
         return log_entry is not None
 
+    def joined_channel_after_start(self, user_id: int, channel_name: str) -> bool:
+        """Verifica se l'utente è entrato nel canale indicato DOPO l'avvio del giveaway."""
+        conn = self.get_connection()
+        row = conn.cursor().execute("""
+            SELECT 1 FROM membership_log ml
+            JOIN giveaway_status gs ON gs.id = 1
+            WHERE ml.user_id = ? AND ml.action = ?
+              AND gs.started_at IS NOT NULL AND ml.timestamp >= gs.started_at
+            LIMIT 1
+        """, (user_id, f"joined:{channel_name}")).fetchone()
+        conn.close()
+        return row is not None
+
     def log_membership_action(self, user_id: int, action: str):
-        """Registra un'azione di join/leave nel log."""
-        if not self.is_giveaway_active(): 
-            return
+        """Registra un'azione di join/leave nel log (anche prima dell'avvio, per riconoscere i membri pre-esistenti)."""
         conn = self.get_connection()
         conn.cursor().execute("INSERT INTO membership_log (user_id, action) VALUES (?, ?)", (user_id, action))
         conn.commit()
@@ -173,18 +191,7 @@ class DatabaseManager:
             conn = self.get_connection()
             cursor = conn.cursor()
             
-            giveaway_started = cursor.execute("SELECT started_at FROM giveaway_status WHERE id = 1").fetchone()
-            was_member_before_giveaway = False
-            
-            if giveaway_started and giveaway_started['started_at']:
-                log_before_start = cursor.execute("""
-                    SELECT 1 FROM membership_log 
-                    WHERE user_id = ? AND timestamp < ? AND action = 'joined'
-                    LIMIT 1
-                """, (user_id, giveaway_started['started_at'])).fetchone()
-                
-                was_member_before_giveaway = log_before_start is not None or is_pre_existing
-            
+            was_member_before_giveaway = self.was_member_before_giveaway(user_id)
             was_ineligible_leaver = self.is_user_marked_as_ineligible_leaver(user_id)
             
             cursor.execute("""
@@ -240,7 +247,7 @@ class DatabaseManager:
         """Recupera la lista dettagliata degli utenti invitati"""
         conn = self.get_connection()
         rows = conn.cursor().execute("""
-            SELECT u.username, u.first_name, u.is_channel_member, rt.is_valid_new_member, rt.referred_id
+            SELECT u.username, u.first_name, u.is_channel_member, rt.is_valid_new_member, rt.referred_id, rt.activated_at
             FROM referral_tracking rt JOIN users u ON rt.referred_id = u.user_id
             WHERE rt.referrer_id = ?
             ORDER BY u.joined_at DESC
@@ -248,11 +255,28 @@ class DatabaseManager:
         conn.close()
         return [dict(row) for row in rows]
 
-    def get_referrers_of_user(self, user_id: int) -> List[int]:
+    def get_valid_referrers_of_user(self, user_id: int) -> List[int]:
+        """Restituisce i referrer per cui l'invito di questo utente è valido."""
         conn = self.get_connection()
-        rows = conn.cursor().execute("SELECT referrer_id FROM referral_tracking WHERE referred_id = ?", (user_id,)).fetchall()
+        rows = conn.cursor().execute(
+            "SELECT referrer_id FROM referral_tracking WHERE referred_id = ? AND is_valid_new_member = 1",
+            (user_id,)
+        ).fetchall()
         conn.close()
         return [row['referrer_id'] for row in rows]
+
+    def mark_referral_activated(self, referrer_id: int, referred_id: int) -> bool:
+        """Segna l'invito come attivato. Restituisce True solo alla prima attivazione."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE referral_tracking SET activated_at = CURRENT_TIMESTAMP
+            WHERE referrer_id = ? AND referred_id = ? AND activated_at IS NULL
+        """, (referrer_id, referred_id))
+        first_time = cursor.rowcount == 1
+        conn.commit()
+        conn.close()
+        return first_time
 
     def get_active_referrals_of_users(self, user_ids: List[int]) -> List[Dict]:
         """Recupera tutti i referral attivi e validi degli utenti indicati"""
@@ -274,26 +298,19 @@ class DatabaseManager:
         conn.close()
         return [dict(row) for row in rows]
 
-    def get_user_rank(self, user_id: int) -> int:
-        """Calcola la posizione in classifica dell'utente tra tutti i partecipanti attivi"""
+    def get_participants_with_referrals(self) -> List[Dict]:
+        """Tutti gli utenti con il conteggio dei referral attivi e validi, in una sola query."""
         conn = self.get_connection()
-        query = """
-            SELECT u.user_id,
-                   COUNT(CASE WHEN rt.is_valid_new_member = 1 AND ref_u.is_channel_member = 1 THEN 1 END) as active_refs,
-                   u.joined_at
+        rows = conn.cursor().execute("""
+            SELECT u.user_id, u.username, u.first_name, u.joined_at, u.is_channel_member,
+                   COUNT(CASE WHEN rt.is_valid_new_member = 1 AND ref_u.is_channel_member = 1 THEN 1 END) AS active_refs
             FROM users u
             LEFT JOIN referral_tracking rt ON u.user_id = rt.referrer_id
             LEFT JOIN users ref_u ON rt.referred_id = ref_u.user_id
-            WHERE u.is_channel_member = 1
             GROUP BY u.user_id
-            ORDER BY active_refs DESC, u.joined_at ASC
-        """
-        rows = conn.cursor().execute(query).fetchall()
+        """).fetchall()
         conn.close()
-        for idx, row in enumerate(rows, start=1):
-            if row['user_id'] == user_id:
-                return idx
-        return len(rows) if rows else 1
+        return [dict(row) for row in rows]
 
     # ========================================================================
     # STATISTICS & PARTICIPANTS
@@ -321,3 +338,40 @@ class DatabaseManager:
         rows = conn.cursor().execute("SELECT * FROM users ORDER BY joined_at DESC").fetchall()
         conn.close()
         return [dict(row) for row in rows]
+
+    # ========================================================================
+    # DRAW RESULTS
+    # ========================================================================
+
+    def save_draw_result(self, result: Dict) -> bool:
+        """Salva l'estrazione e chiude il giveaway. Restituisce False se esisteva già un'estrazione."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR IGNORE INTO draw_results (id, result_json) VALUES (1, ?)",
+            (json.dumps(result, ensure_ascii=False),)
+        )
+        saved = cursor.rowcount == 1
+        if saved:
+            cursor.execute("UPDATE giveaway_status SET is_active = 0 WHERE id = 1")
+        conn.commit()
+        conn.close()
+        return saved
+
+    def get_draw_result(self) -> Optional[Dict]:
+        conn = self.get_connection()
+        row = conn.cursor().execute("SELECT result_json FROM draw_results WHERE id = 1").fetchone()
+        conn.close()
+        return json.loads(row['result_json']) if row else None
+
+    def reset_draw(self):
+        """Annulla l'estrazione salvata e riapre il giveaway (es. dopo un'estrazione di prova)."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM draw_results WHERE id = 1")
+        cursor.execute("UPDATE giveaway_status SET is_active = 1 WHERE id = 1 AND started_at IS NOT NULL")
+        conn.commit()
+        conn.close()
+
+    def is_giveaway_ended(self) -> bool:
+        return self.get_draw_result() is not None
